@@ -292,21 +292,44 @@ def generar_modelo_financiero_detallado(p, capex, tabla_amortizacion, monto_deud
 def _npv_at_rate(flujos, r):
     """
     Evaluate NPV for monthly rate r. r must be > -1 (denominator positive for t>=0).
+    Robust against overflow in power calculation.
     """
     flujos_valores = flujos.values if hasattr(flujos, "values") else list(flujos)
+    
+    # Use loop for safety against overflow/div0 issues if r is extreme
     denom_base = 1.0 + r
+    
     if denom_base <= 0:
-        s = 0.0
-        for t, cf in enumerate(flujos_valores):
-            denom = (1.0 + r) ** t
+         # Technically undefined for real log, but if r < -1 we flip signs violently or div by zero
+         # For finance, we just return infinity if we hit a zero denominator
+         return float('inf') 
+
+    val_actual = 0.0
+    for t, cf in enumerate(flujos_valores):
+        if cf == 0: continue
+        try:
+            # denom = denom_base ** t
+            # Optimization & Safety:
+            # if r > 0 and t is large, denom grows -> cf/denom -> 0
+            # if r < 0 (close to -1) and t is large, denom -> 0 -> cf/denom -> inf
+            
+            # Use log-based check or just try-except
+            denom = denom_base ** t
             if denom == 0:
-                # avoid division by zero
                 return float('inf') if cf > 0 else -float('inf')
-            s += cf / denom
-        return s
-    else:
-        t = np.arange(len(flujos_valores))
-        return float(np.sum(np.array(flujos_valores) / (denom_base ** t)))
+            
+            term = cf / denom
+            val_actual += term
+        except (OverflowError, FloatingPointError, ZeroDivisionError):
+             # If calculating denom overflows, then term implies 0 (if denom is huge) or inf
+             if abs(denom_base) > 1:
+                 # denom -> infinity, term -> 0
+                 pass 
+             else:
+                 # denom -> 0, term -> inf
+                 return float('inf') if cf > 0 else -float('inf')
+                 
+    return val_actual
 
 
 def _find_roots_by_bracketing(flujos, r_min=-0.9999, r_max=5.0, steps=2000, tol=1e-8, maxiter=200):
