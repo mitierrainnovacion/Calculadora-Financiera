@@ -1,0 +1,14 @@
+
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store
+.vscode/
+.idea/
+venv/
+env/
+*.log
+.gemini/
+audit_german.py
+diagnostico_tir.py
+debug_irr.py
