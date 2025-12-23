@@ -127,14 +127,17 @@ class App(ctk.CTk):
         
         self.base_results_labels = {
             "inv_total": self._create_result_label(base_results_frame, "Inversión Total Proyectada:", 1),
-            "capital_requerido": self._create_result_label(base_results_frame, "Capital Propio Requerido:", 2),
-            "wacc": self._create_result_label(base_results_frame, "WACC (Costo Promedio Capital):", 3),
-            "van_proyecto": self._create_result_label(base_results_frame, "VAN del Proyecto (No Apalancado):", 4),
-            "tir_proyecto": self._create_result_label(base_results_frame, "TIR del Proyecto (No Apalancado):", 5),
-            "van_inversionista": self._create_result_label(base_results_frame, "VAN del Inversionista (Apalancado):", 6),
-            "tir_inversionista": self._create_result_label(base_results_frame, "TIR del Inversionista (ROE esperado):", 7),
-            "roi_total": self._create_result_label(base_results_frame, "Retorno sobre Inversión (ROI Total):", 8),
-            "multiplo_capital": self._create_result_label(base_results_frame, "Múltiplo de Capital (MOIC):", 9),
+            "inv_con_intereses": self._create_result_label(base_results_frame, "Inversión Total (con Intereses):", 2),
+            "capital_requerido": self._create_result_label(base_results_frame, "Capital Propio Requerido:", 3),
+            "wacc": self._create_result_label(base_results_frame, "WACC (Costo Promedio Capital):", 4),
+            "van_proyecto": self._create_result_label(base_results_frame, "VAN del Proyecto (No Apalancado):", 5),
+            "tir_proyecto": self._create_result_label(base_results_frame, "TIR del Proyecto (No Apalancado):", 6),
+            "van_inversionista": self._create_result_label(base_results_frame, "VAN del Inversionista (Apalancado):", 7),
+            "tir_inversionista": self._create_result_label(base_results_frame, "TIR del Inversionista (ROE esperado):", 8),
+            "roi_total": self._create_result_label(base_results_frame, "Retorno sobre Inversión (ROI Total):", 9),
+            "multiplo_capital": self._create_result_label(base_results_frame, "Múltiplo de Capital (MOIC):", 10),
+            "payback_normal": self._create_result_label(base_results_frame, "Payback Normal (meses):", 11),
+            "payback_descontado": self._create_result_label(base_results_frame, "Payback Descontado (meses):", 12),
         }
         
         # --- Pestañas de Sensibilidad ---
@@ -148,8 +151,7 @@ class App(ctk.CTk):
         
         # --- Pestaña de Detalle Deuda ---
         deuda_frame = self.output_tabview.tab("Detalle Deuda")
-        self.lbl_cronograma = ctk.CTkLabel(deuda_frame, text="Cronograma de Amortización", font=ctk.CTkFont(weight="bold"))
-        self.lbl_cronograma.pack(pady=5)
+        ctk.CTkLabel(deuda_frame, text="Cronograma de Amortización (Sistema Alemán)", font=ctk.CTkFont(weight="bold")).pack(pady=5)
         
         # Resumen de Deuda (Totalizadores)
         self.deuda_summary_frame = ctk.CTkFrame(deuda_frame)
@@ -254,17 +256,10 @@ class App(ctk.CTk):
         # Capitalización selector
         cap_frame = ctk.CTkFrame(finan_frame)
         cap_frame.pack(pady=4, padx=10, fill="x", expand=True)
-        ctk.CTkLabel(cap_frame, text="Capitalización de Intereses", width=200, anchor="w").pack(side="left", padx=10)
+        ctk.CTkLabel(cap_frame, text="Capitalización de Intereses", width=450, anchor="w").pack(side="left", padx=10)
         self.capitalizacion_var = ctk.StringVar(value=params["financiamiento"].get("capitalizacion", "Mensual"))
-        cap_combo = ctk.CTkComboBox(cap_frame, values=["Mensual", "Trimestral", "Semestral", "Anual"], variable=self.capitalizacion_var, width=150)
-        cap_combo.pack(side="left", padx=5, fill="x", expand=True)
-
-        # Sistema Amortización selector
-        ctk.CTkLabel(cap_frame, text="Sistema", width=80, anchor="w").pack(side="left", padx=5)
-        self.sistema_amort_var = ctk.StringVar(value=params["financiamiento"].get("sistema_amortizacion", "Alemán"))
-        sys_combo = ctk.CTkComboBox(cap_frame, values=["Alemán", "Francés"], variable=self.sistema_amort_var, width=150)
-        sys_combo.pack(side="left", padx=5, fill="x", expand=True)
-
+        cap_combo = ctk.CTkComboBox(cap_frame, values=["Mensual", "Trimestral", "Semestral", "Anual"], variable=self.capitalizacion_var, width=200)
+        cap_combo.pack(side="left", padx=10, fill="x", expand=True)
 
         self._create_entry(finan_frame, "Costo Capital Propio %", ("financiamiento", "costo_capital_propio_anual"), params["financiamiento"]["costo_capital_propio_anual"] * 100)
         self._create_entry(finan_frame, "Impuesto Renta %", ("financiamiento", "tasa_impuesto_renta"), params["financiamiento"]["tasa_impuesto_renta"] * 100)
@@ -411,8 +406,17 @@ class App(ctk.CTk):
             multiplo = (total_retornado / invested_equity) if invested_equity > 0 else 0
             roi_total = ((total_retornado - invested_equity) / invested_equity) if invested_equity > 0 else 0
 
+            # Calcular Inversión Total con Intereses
+            total_intereses = cf.calcular_total_intereses(deuda)
+            inversion_con_intereses = inv_total + total_intereses
+
+            # Calcular Payback Periods
+            payback_n = cf.payback_normal(fcf_inversionista)
+            payback_d = cf.payback_descontado(fcf_inversionista, wacc)
+
             # Actualizar GUI
             self.base_results_labels["inv_total"].configure(text=f"$ {inv_total:,.0f}")
+            self.base_results_labels["inv_con_intereses"].configure(text=f"$ {inversion_con_intereses:,.0f}")
             self.base_results_labels["capital_requerido"].configure(text=f"$ {monto_equity:,.0f}")
             self.base_results_labels["wacc"].configure(text=f"{wacc:.2%}")
             self.base_results_labels["van_proyecto"].configure(text=f"$ {van_p:,.0f}")
@@ -421,6 +425,8 @@ class App(ctk.CTk):
             self.base_results_labels["tir_inversionista"].configure(text=f"{tir_i:.2%}" if tir_i is not None else "N/A")
             self.base_results_labels["roi_total"].configure(text=f"{roi_total:.2%}")
             self.base_results_labels["multiplo_capital"].configure(text=f"{multiplo:.2f}x")
+            self.base_results_labels["payback_normal"].configure(text=f"{payback_n:.2f}" if payback_n is not None else "N/A")
+            self.base_results_labels["payback_descontado"].configure(text=f"{payback_d:.2f}" if payback_d is not None else "N/A")
 
             # Sensibilidad
             df_van, df_tir = self._run_sensitivity_analysis(params)
@@ -430,7 +436,6 @@ class App(ctk.CTk):
             self.output_tabview.set("Resumen")
             
             # 5. Actualizar Detalle de Deuda
-            self.lbl_cronograma.configure(text=f"Cronograma de Amortización (Sistema {params['financiamiento']['sistema_amortizacion']})")
             self._update_deuda_treeview(modelo_df)
             
             # 6. Actualizar Proyección Operativa
@@ -464,9 +469,7 @@ class App(ctk.CTk):
         params["financiamiento"]["costo_deuda_anual"] = float(self.entries[("financiamiento", "costo_deuda_anual")].get()) / 100
         params["financiamiento"]["plazo_deuda_meses"] = int(self.entries[("financiamiento", "plazo_deuda_meses")].get())
         params["financiamiento"]["capitalizacion"] = self.capitalizacion_var.get()
-        params["financiamiento"]["sistema_amortizacion"] = self.sistema_amort_var.get()
         params["financiamiento"]["costo_capital_propio_anual"] = float(self.entries[("financiamiento", "costo_capital_propio_anual")].get()) / 100
-
         params["financiamiento"]["tasa_impuesto_renta"] = float(self.entries[("financiamiento", "tasa_impuesto_renta")].get()) / 100
         
         params["cronograma_inversion"] = []

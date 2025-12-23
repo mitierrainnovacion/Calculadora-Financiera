@@ -80,12 +80,11 @@ def construir_cronograma_inversiones(p):
 
 def crear_tabla_amortizacion(p, monto_deuda):
     """
-    Calcula la tabla de amortización usando el sistema seleccionado (Alemán o Francés).
+    Calcula la tabla de amortización usando el SISTEMA ALEMÁN (amortización de capital constante por período de pago).
     Soporta diferentes frecuencias de capitalización/pago.
 
     - `plazo_deuda_meses` es el horizonte en meses del préstamo.
     - `capitalizacion` define la frecuencia de pago en meses (Mensual=1, Trimestral=3, Semestral=6, Anual=12).
-    - `sistema_amortizacion` define el tipo: "Alemán" (capital constante) o "Francés" (cuota constante).
     - La tasa anual `costo_deuda_anual` se interpreta como tasa efectiva anual (EAR).
     """
     import math
@@ -94,10 +93,6 @@ def crear_tabla_amortizacion(p, monto_deuda):
     tasa_anual = p["financiamiento"]["costo_deuda_anual"]
     freq_map = {"Mensual": 1, "Trimestral": 3, "Semestral": 6, "Anual": 12}
     period_months = freq_map.get(p["financiamiento"].get("capitalizacion", "Mensual"), 1)
-    
-    # Sistema de amortización (Default: Alemán)
-    sistema = p["financiamiento"].get("sistema_amortizacion", "Alemán")
-
 
     # Número de pagos (uno cada `period_months`)
     if period_months <= 0:
@@ -108,24 +103,9 @@ def crear_tabla_amortizacion(p, monto_deuda):
     # Si tasa_anual es EAR, la tasa periódica es:
     periodic_rate = (1 + tasa_anual) ** (period_months / 12.0) - 1 if num_payments > 0 else 0.0
 
-    # --- LÓGICA DE AMORTIZACIÓN POR SISTEMA ---
-    amort_por_pago = 0.0
-    cuota_francesa = 0.0
-    
-    if num_payments > 0 and monto_deuda > 0:
-        if sistema == "Alemán":
-            # Amortización de capital constante
-            amort_por_pago = monto_deuda / num_payments
-        elif sistema == "Francés":
-            # Cuota constante (Interés + Principal)
-            if periodic_rate > 0:
-                # Formula: A = P * [r(1+r)^n] / [(1+r)^n - 1]
-                factor = (1 + periodic_rate) ** num_payments
-                cuota_francesa = monto_deuda * (periodic_rate * factor) / (factor - 1)
-            else:
-                 # Si tasa es 0, es división simple
-                cuota_francesa = monto_deuda / num_payments
-    
+    # Amortización de capital por pago (sistema alemán: capital constante por pago)
+    amort_por_pago = (monto_deuda / num_payments) if num_payments > 0 else 0.0
+
     cronograma = []
     saldo = monto_deuda
 
@@ -135,25 +115,13 @@ def crear_tabla_amortizacion(p, monto_deuda):
             interes_pagado = 0.0
             principal_pagado = 0.0
 
-            # Si es mes de pago (cada period_months)
+            # Si es mes de pago (cada period_months), se paga interés + principal
             if mes % period_months == 0:
                 # calcular interés sobre el saldo vigente al inicio del período
                 interes_pagado = saldo * periodic_rate
-                
-                if sistema == "Alemán":
-                    principal_pagado = amort_por_pago
-                elif sistema == "Francés":
-                    # Principal = Cuota - Interés
-                    cuota_actual = cuota_francesa
-                    
-                    # Ajuste final para no deber centavos o pagar de más
-                    if mes == ((num_payments) * period_months) or (saldo * (1+periodic_rate) < cuota_actual):
-                         # Última cuota o saldo pequeño: se liquida todo
-                         principal_pagado = saldo
-                    else:
-                        principal_pagado = cuota_actual - interes_pagado
+                principal_pagado = amort_por_pago
 
-                # evitar sobregiro final por redondeos (común en ambos sistemas)
+                # evitar sobregiro final por redondeos
                 principal_pagado = min(principal_pagado, saldo)
                 saldo -= principal_pagado
 
@@ -595,6 +563,88 @@ def WACC(p):
     we = 1 - wd
     t = cfg_fin["tasa_impuesto_renta"]
     return (we * ke) + (wd * kd * (1 - t)) if wd > 0 else ke
+
+def calcular_total_intereses(tabla_amortizacion):
+    """
+    Calcula el total de intereses pagados en un cronograma de amortización.
+    
+    Parameters:
+      tabla_amortizacion: DataFrame con columna "Interés"
+    
+    Returns:
+      float: suma total de intereses
+    """
+    if tabla_amortizacion is None or tabla_amortizacion.empty:
+        return 0.0
+    return tabla_amortizacion["Interés"].sum()
+
+def payback_normal(flujos):
+    """
+    Calcula el período de recupero simple (Payback Normal).
+    
+    Parameters:
+      flujos: iterable de flujos de caja mensuales
+              flujos[0] es la inversión inicial (negativa)
+              flujos[t] son los flujos netos del mes t
+    
+    Returns:
+      float: tiempo de recupero en meses (con decimales)
+      None: si no se recupera la inversión
+    """
+    flujos_valores = flujos.values if hasattr(flujos, "values") else list(flujos)
+    acumulado = 0.0
+    
+    for mes in range(len(flujos_valores)):
+        acumulado_anterior = acumulado
+        acumulado += flujos_valores[mes]
+        
+        if acumulado >= 0:
+            # Interpolación lineal para el mes exacto
+            faltante = abs(acumulado_anterior)
+            if flujos_valores[mes] != 0:
+                fraccion = faltante / flujos_valores[mes]
+                return mes - 1 + fraccion
+            else:
+                return float(mes)
+    
+    return None  # No se recupera
+
+def payback_descontado(flujos, tasa_anual):
+    """
+    Calcula el período de recupero descontado (Discounted Payback).
+    
+    Parameters:
+      flujos: iterable de flujos de caja mensuales
+      tasa_anual: tasa de descuento anual (EAR)
+    
+    Returns:
+      float: tiempo de recupero en meses (con decimales)
+      None: si no se recupera la inversión
+    """
+    flujos_valores = flujos.values if hasattr(flujos, "values") else list(flujos)
+    
+    # Convertir tasa anual a mensual efectiva
+    tasa_mensual = (1 + tasa_anual) ** (1 / 12) - 1
+    
+    acumulado = 0.0
+    
+    for mes in range(len(flujos_valores)):
+        # Descontar el flujo del mes actual
+        flujo_descontado = flujos_valores[mes] / ((1 + tasa_mensual) ** mes)
+        acumulado_anterior = acumulado
+        acumulado += flujo_descontado
+        
+        if acumulado >= 0:
+            # Interpolación lineal para el mes exacto
+            faltante = abs(acumulado_anterior)
+            if flujo_descontado != 0:
+                fraccion = faltante / flujo_descontado
+                return mes - 1 + fraccion
+            else:
+                return float(mes)
+    
+    return None  # No se recupera
+
 
 # ==============================================================================
 # 5. MÓDULO DE ANÁLISIS DE SENSIBILIDAD
