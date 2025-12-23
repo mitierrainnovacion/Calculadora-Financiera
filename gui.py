@@ -587,23 +587,15 @@ class App(ctk.CTk):
             elif recuperado_normal and recuperado_desc:
                 estado = "✓ Ambos"
             
-            # Mostrar solo hasta unos meses después de la recuperación o primeros/últimos meses
-            mostrar = (
-                mes <= 5 or  # Primeros meses
-                (payback_n is not None and abs(mes - payback_n) <= 3) or  # Cerca del payback normal
-                (payback_d is not None and abs(mes - payback_d) <= 3) or  # Cerca del payback descontado
-                mes >= len(flujos_valores) - 3  # Últimos meses
-            )
-            
-            if mostrar or estado:
-                self.payback_tree.insert("", "end", values=(
-                    mes,
-                    f"$ {flujo:,.0f}",
-                    f"$ {acum_normal:,.0f}",
-                    f"$ {flujo_desc:,.0f}",
-                    f"$ {acum_desc:,.0f}",
-                    estado
-                ))
+            # Mostrar todos los meses
+            self.payback_tree.insert("", "end", values=(
+                mes,
+                f"$ {flujo:,.0f}",
+                f"$ {acum_normal:,.0f}",
+                f"$ {flujo_desc:,.0f}",
+                f"$ {acum_desc:,.0f}",
+                estado
+            ))
 
 
     def _run_sensitivity_analysis(self, p_base):
