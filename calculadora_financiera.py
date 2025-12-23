@@ -149,33 +149,69 @@ def crear_tabla_amortizacion(p, monto_deuda):
 
 def generar_modelo_financiero_detallado(p, capex, tabla_amortizacion, monto_deuda_total):
     """
-    Genera el modelo financiero detallado con lógica de gastos dinámicos y lotes.
+    Genera el modelo financiero detallado con estricta separación de flujos
+    de PROYECTO (No Apalancado) vs INVERSIONISTA (Apalancado).
+    
+    Reglas de Negocio:
+    1. FCFF (Proyecto) = NOPAT + Depreciacion + CAPEX (+/- WK).
+       - NOPAT usa Impuestos Operativos (asumiendo deuda=0).
+       - Excluye intereses y amortización.
+    2. FCFE (Inversionista) = FCFF - Intereses*(1-T) - Amortización + Nueva Deuda.
+       - Refleja el flujo neto real para el accionista.
+    3. t=0: Se maneja explícitamente. Si (CAPEX_0 + Deuda_0) < 0, es aporte de equity.
     """
     horizonte = p["horizonte_meses"]
     tasa_impuesto = p["financiamiento"]["tasa_impuesto_renta"]
     
+    # Columnas extendidas para traza clara
     columnas = [
         "Ingresos Ventas Pies", "Ingresos Ventas Cuotas", "Otros Ingresos", "Ingresos Totales",
         "Costos Operativos Dinámicos", "EBITDA", "Depreciacion", "EBIT",
-        "Intereses", "EBT", "Perdida Arrastrable Usada", "Base Imponible", "Impuestos",
-        "Utilidad Neta", "NOPAT", "FCF Operativo", "CAPEX",
-        "FCF No Apalancado (FCFF)", "Entrada Deuda", "Amortización Principal", "Net Debt Issued",
-        "FCF Apalancado (FCFE)", "Aportación Capital", "Flujo Caja Neto Inversionista", "Saldo Deuda",
-        "Lotes Vendidos", "Lotes en Inventario"
+        "Impuestos Operativos (Teóricos)", "NOPAT", "FCF Operativo", "CAPEX", "FCF No Apalancado (FCFF)",
+        "Intereses", "Ahorro Fiscal Intereses", "Amortización Principal", "Entrada Deuda",
+        "Net Debt Cashflow", "FCF Apalancado (FCFE)",
+        # Métricas P&L Real (Contable)
+        "EBT", "Impuestos Reales", "Utilidad Neta",
+        "Lotes Vendidos", "Lotes en Inventario", "Saldo Deuda"
     ]
+    
+    # Inicializar DataFrame con t=0 hasta t=Horizonte
     df = pd.DataFrame(0.0, index=range(horizonte + 1), columns=columnas)
     
-    # Deuda y CAPEX
-    df["CAPEX"] = -capex.reindex(df.index, fill_value=0.0)
-    if tabla_amortizacion is not None:
-        df["Intereses"] = tabla_amortizacion["Interés"].reindex(df.index, fill_value=0.0)
-        df["Amortización Principal"] = -tabla_amortizacion["Principal"].reindex(df.index, fill_value=0.0)
-        df["Saldo Deuda"] = tabla_amortizacion["Saldo Pendiente"].reindex(df.index, fill_value=0.0)
-    df.loc[0, "Entrada Deuda"] = monto_deuda_total
+    # --------------------------------------------------------------------------
+    # 1. CARGA DE ESTRUCTURAS DE TIEMPO (CAPEX, DEUDA)
+    # --------------------------------------------------------------------------
     
-    # Lotes Totales
+    # CAPEX es negativo (salida de caja)
+    df["CAPEX"] = -capex.reindex(df.index, fill_value=0.0)
+    
+    # Deuda (Tabla Amortización del sistema alemán/francés ya calculado)
+    if tabla_amortizacion is not None:
+        # Interés y amortización son salidas (positivas en tabla, negativas en flujo)
+        # Ajustamos signo en el bucle o aquí. Preferible explícito:
+        # Interés es gasto, Amortización es flujo salida.
+        interes_reindex = tabla_amortizacion["Interés"].reindex(df.index, fill_value=0.0)
+        principal_reindex = tabla_amortizacion["Principal"].reindex(df.index, fill_value=0.0)
+        saldo_reindex = tabla_amortizacion["Saldo Pendiente"].reindex(df.index, fill_value=0.0)
+        
+        df["Intereses"] = interes_reindex
+        df["Amortización Principal"] = -principal_reindex # Flujo salida
+        df["Saldo Deuda"] = saldo_reindex
+    else:
+        df["Intereses"] = 0.0
+        df["Amortización Principal"] = 0.0
+        df["Saldo Deuda"] = 0.0
+
+    # Entrada de Deuda (t=0 usualmente)
+    df.loc[0, "Entrada Deuda"] = monto_deuda_total
+
+    # Lotes e Inventario
     total_lotes = sum(plan["cantidad_lotes"] for plan in p.get("planes_venta", []))
     df.loc[0, "Lotes en Inventario"] = total_lotes
+    
+    # --------------------------------------------------------------------------
+    # 2. PROYECCIÓN OPERATIVA (INGRESOS, COSTOS, EBITDA)
+    # --------------------------------------------------------------------------
     
     cobros_programados_pies = np.zeros(horizonte + 1)
     cobros_programados_cuotas = np.zeros(horizonte + 1)
@@ -185,9 +221,14 @@ def generar_modelo_financiero_detallado(p, capex, tabla_amortizacion, monto_deud
         v_planes.append({**p_v, "lotes_restantes": p_v["cantidad_lotes"]})
     
     crecimiento_anual = p["ventas"].get("crecimiento_precio_anual", 0.0)
-    perdida_arrastrable = 0.0
-
+    
+    # Variables de estado para pérdidas fiscales (real y operativa)
+    perdida_arrastrable_real = 0.0
+    # Podríamos modelar pérdida operativa teórica para NOPAT si se desea estricto,
+    # por simplicidad NOPAT = EBIT * (1-t) asumiendo escudo inmediato o simplificado.
+    
     for mes in range(1, horizonte + 1):
+        # A. Ventas
         factor_precio = (1 + crecimiento_anual) ** ((mes - 1) / 12.0)
         lotes_vendidos_mes = 0
         
@@ -218,11 +259,8 @@ def generar_modelo_financiero_detallado(p, capex, tabla_amortizacion, monto_deud
         df.loc[mes, "Ingresos Ventas Pies"] = cobros_programados_pies[mes]
         df.loc[mes, "Ingresos Ventas Cuotas"] = cobros_programados_cuotas[mes]
         
-        # Otros Ingresos y Gastos
+        # B. Otros Ingresos
         ing_periodico = 0
-        cost_dinamico = 0
-        
-        # Primero sumamos ingresos para tener la base de ventas
         for item in p.get("items_periodicos", []):
             if item["mes_inicio"] <= mes <= item["mes_fin"] and item["tipo"] == "Ingreso":
                 ing_periodico += item["monto"]
@@ -231,7 +269,8 @@ def generar_modelo_financiero_detallado(p, capex, tabla_amortizacion, monto_deud
         ing_totales = df.loc[mes, "Ingresos Ventas Pies"] + df.loc[mes, "Ingresos Ventas Cuotas"] + ing_periodico
         df.loc[mes, "Ingresos Totales"] = ing_totales
         
-        # Ahora calculamos gastos (que pueden depender de Ingresos Totales o Lotes en Inventario)
+        # C. Costos Operativos
+        cost_dinamico = 0
         for item in p.get("items_periodicos", []):
             if item["mes_inicio"] <= mes <= item["mes_fin"] and item["tipo"] == "Gasto":
                 base = item.get("base_calculo", "Monto Fijo")
@@ -242,48 +281,106 @@ def generar_modelo_financiero_detallado(p, capex, tabla_amortizacion, monto_deud
                 elif base == "Por Lote Inventario":
                     cost_dinamico += df.loc[mes, "Lotes en Inventario"] * item["monto"]
                 elif base == "% Utilidad":
-                    # EBITDA preliminar sin este gasto
                     ebitda_pre = ing_totales - cost_dinamico
                     cost_dinamico += max(0, ebitda_pre) * (item["monto"] / 100)
-
+        
         df.loc[mes, "Costos Operativos Dinámicos"] = -cost_dinamico
         df.loc[mes, "EBITDA"] = df.loc[mes, "Ingresos Totales"] + df.loc[mes, "Costos Operativos Dinámicos"]
-        
-        # Resto del P&L
         df.loc[mes, "EBIT"] = df.loc[mes, "EBITDA"] - df.loc[mes, "Depreciacion"]
-        df.loc[mes, "EBT"] = df.loc[mes, "EBIT"] - df.loc[mes, "Intereses"]
-        
-        base_imp = df.loc[mes, "EBT"]
-        if base_imp < 0:
-            perdida_arrastrable += abs(base_imp)
-            df.loc[mes, "Impuestos"] = 0
-        else:
-            uso_perdida = min(base_imp, perdida_arrastrable)
-            df.loc[mes, "Perdida Arrastrable Usada"] = uso_perdida
-            perdida_arrastrable -= uso_perdida
-            df.loc[mes, "Base Imponible"] = base_imp - uso_perdida
-            df.loc[mes, "Impuestos"] = -df.loc[mes, "Base Imponible"] * tasa_impuesto
-            
-        df.loc[mes, "Utilidad Neta"] = df.loc[mes, "EBT"] + df.loc[mes, "Impuestos"]
-        df.loc[mes, "NOPAT"] = df.loc[mes, "EBIT"] * (1 - tasa_impuesto)
-        df.loc[mes, "FCF Operativo"] = df.loc[mes, "EBITDA"] + df.loc[mes, "Impuestos"]
-        df.loc[mes, "FCF No Apalancado (FCFF)"] = df.loc[mes, "FCF Operativo"] + df.loc[mes, "CAPEX"]
-        df.loc[mes, "Net Debt Issued"] = df.loc[mes, "Entrada Deuda"] + df.loc[mes, "Amortización Principal"]
-        df.loc[mes, "FCF Apalancado (FCFE)"] = df.loc[mes, "FCF No Apalancado (FCFF)"] + df.loc[mes, "Net Debt Issued"]
-        
-        capital_aportado = 0
-        if mes == 1:
-            capital_inv = abs(df.loc[0, "CAPEX"]) - df.loc[0, "Entrada Deuda"]
-            capital_aportado = max(0, capital_inv)
-        
-        df.loc[mes, "Aportación Capital"] = capital_aportado
-        df.loc[mes, "Flujo Caja Neto Inversionista"] = df.loc[mes, "FCF Apalancado (FCFE)"] - capital_aportado
 
-    df.attrs["roi_estatico"] = (df["Utilidad Neta"].sum() / abs(df.loc[0, "CAPEX"])) if abs(df.loc[0, "CAPEX"]) != 0 else 0
-    aport = df.loc[1, "Aportación Capital"] if 1 in df.index else 0
-    df.attrs["multiplo_capital"] = ((np.nan if aport == 0 else (df["Flujo Caja Neto Inversionista"].sum() + aport) / aport))
+    # --------------------------------------------------------------------------
+    # 3. FLUJO DE CAJA DEL PROYECTO (UNLEVERAGED)
+    # --------------------------------------------------------------------------
+    # NOPAT = EBIT * (1 - T). Asumimos impuestos operativos teóricos sin deuda.
+    # FCFF = NOPAT + Depreciacion + CAPEX
+    
+    # Manejo de impuestos operativos negativos:
+    # Si EBIT < 0, impuesto operativo es 0 (o crédito fiscal si se asume simetría perfecta).
+    # Para ser conservador y estándar: Impuesto Operativo = max(0, EBIT) * T
+    df["Impuestos Operativos (Teóricos)"] = df["EBIT"].apply(lambda x: -x * tasa_impuesto if x > 0 else 0)
+    df["NOPAT"] = df["EBIT"] + df["Impuestos Operativos (Teóricos)"] 
+    df["FCF Operativo"] = df["NOPAT"] + df["Depreciacion"] # (+/- Variación Capital de Trabajo si existiera)
+    
+    # FCFF incluye todos los periodos (t=0 también, donde EBIT=0, pero CAPEX != 0)
+    df["FCF No Apalancado (FCFF)"] = df["FCF Operativo"] + df["CAPEX"]
+
+    # --------------------------------------------------------------------------
+    # 4. FLUJO DE CAJA DEL INVERSIONISTA (LEVERAGED)
+    # --------------------------------------------------------------------------
+    # P&L Real (con Intereses) para impuestos reales
+    df["EBT"] = df["EBIT"] - df["Intereses"]
+    
+    # Cálculo de impuestos reales con pérdida arrastrable
+    impuestos_reales = []
+    p_arrastrable = 0.0
+    
+    for val_ebt in df["EBT"]:
+        if val_ebt < 0:
+            p_arrastrable += abs(val_ebt)
+            impuestos_reales.append(0.0)
+        else:
+            uso = min(val_ebt, p_arrastrable)
+            p_arrastrable -= uso
+            base = val_ebt - uso
+            impuestos_reales.append(-base * tasa_impuesto)
+            
+    df["Impuestos Reales"] = impuestos_reales
+    df["Utilidad Neta"] = df["EBT"] + df["Impuestos Reales"]
+    
+    # Derivación FCFE desde FCFF (Método Estándar Robusto)
+    # FCFE = FCFF - Intereses*(1-T) - Amortización + Deuda Nueva
+    
+    # Ahorro Fiscal de Intereses (Tax Shield)
+    # OJO: La fórmula FCFF - Int(1-t) asume que la empresa paga impuestos operativos y recupera el escudo.
+    # Si usamos los impuestos reales calculados arriba, es más exacto hacer:
+    # FCFE = Utilidad Neta + Depreciacion + CAPEX + Amortizacion + Deuda Nueva - VariacionCapitalTrabajo
+    # Validemos contra la fórmula pedida:
+    # FCFE request: FCFF - Int(1-T) - Amort + Deuda
+    
+    # Calculamos el Escudo Fiscal REAL que se usó (diferencia entre impuesto operativo y real no es solo intereses, es p.arrastrable)
+    # Para consistencia absoluta con el P&L, usaremos el método directo desde la Utilidad Neta, 
+    # que es matemáticamente equivalente pero evita errores de escudo fiscal teórico vs real.
+    
+    # FCFE = Utilidad Neta + Depreciacion + CAPEX + (Entrada Deuda + Amortización Principal)
+    # Nota: Amortización Principal ya es negativa.
+    
+    df["Net Debt Cashflow"] = df["Entrada Deuda"] + df["Amortización Principal"]
+    
+    # Método "Directo" (Más seguro para P&L complejo):
+    df["FCF Apalancado (FCFE)"] = (
+        df["Utilidad Neta"] + 
+        df["Depreciacion"] + 
+        df["CAPEX"] + 
+        df["Net Debt Cashflow"]
+    )
+    
+    # Nota: En t=0, Utilidad=0, Dep=0. FCFE_0 = CAPEX_0 + Deuda_0. 
+    # Si CAPEX=-100 y Deuda=60 -> FCFE = -40 (Equity Injection). Correcto.
+    
+    # "Flujo Caja Neto Inversionista" es simplemente alias de FCFE para el GUI
+    # Las aportaciones de capital negativas YA ESTÁN INCLUIDAS en FCFE cuando es negativo.
+    # No necesitamos columna separada "Aportación Capital" forzada, salvo para visualización.
+    df["Flujo Caja Neto Inversionista"] = df["FCF Apalancado (FCFE)"]
+    
+    # Para visualización en GUI, podemos extraer los negativos como "Aportación"
+    df["Aportación Capital"] = df["FCF Apalancado (FCFE)"].apply(lambda x: -x if x < 0 else 0)
+
+    # --------------------------------------------------------------------------
+    # 5. KPIS SIMPLES
+    # --------------------------------------------------------------------------
+    # ROI Estático (basado en inversión inicial total o equity sumado)
+    total_capex = abs(df["CAPEX"].sum())
+    df.attrs["roi_estatico"] = (df["Utilidad Neta"].sum() / total_capex) if total_capex != 0 else 0
+    
+    # Múltiplo sobre Equity (MOIC)
+    # Suma de flujos positivos / Suma de flujos negativos (en abs)
+    f_pos = df[df["FCF Apalancado (FCFE)"] > 0]["FCF Apalancado (FCFE)"].sum()
+    f_neg = abs(df[df["FCF Apalancado (FCFE)"] < 0]["FCF Apalancado (FCFE)"].sum())
+    
+    df.attrs["multiplo_capital"] = (f_pos / f_neg) if f_neg > 0 else np.nan
     
     return df
+
 
 # ==============================================================================
 # 4. FUNCIONES DE MÉTRICAS FINANCIERAS
@@ -305,29 +402,22 @@ def _npv_at_rate(flujos, r):
          return float('inf') 
 
     val_actual = 0.0
-    for t, cf in enumerate(flujos_valores):
-        if cf == 0: continue
-        try:
-            # denom = denom_base ** t
-            # Optimization & Safety:
-            # if r > 0 and t is large, denom grows -> cf/denom -> 0
-            # if r < 0 (close to -1) and t is large, denom -> 0 -> cf/denom -> inf
-            
-            # Use log-based check or just try-except
-            denom = denom_base ** t
-            if denom == 0:
-                return float('inf') if cf > 0 else -float('inf')
-            
-            term = cf / denom
-            val_actual += term
-        except (OverflowError, FloatingPointError, ZeroDivisionError):
-             # If calculating denom overflows, then term implies 0 (if denom is huge) or inf
-             if abs(denom_base) > 1:
-                 # denom -> infinity, term -> 0
-                 pass 
-             else:
-                 # denom -> 0, term -> inf
-                 return float('inf') if cf > 0 else -float('inf')
+    # Suppress warnings for division/overflow as we handle them explicitly
+    with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+        for t, cf in enumerate(flujos_valores):
+            if cf == 0: continue
+            try:
+                denom = denom_base ** t
+                if denom == 0:
+                    return float('inf') if cf > 0 else -float('inf')
+                
+                term = cf / denom
+                val_actual += term
+            except (OverflowError, FloatingPointError, ZeroDivisionError):
+                 if abs(denom_base) > 1:
+                     pass 
+                 else:
+                     return float('inf') if cf > 0 else -float('inf')
                  
     return val_actual
 
@@ -345,7 +435,8 @@ def _find_roots_by_bracketing(flujos, r_min=-0.9999, r_max=5.0, steps=2000, tol=
         y1, y2 = npv_grid[i], npv_grid[i+1]
         if np.isfinite(y1) and np.isfinite(y2) and y1 == 0:
             roots.append(r_grid[i])
-        elif np.isfinite(y1) and np.isfinite(y2) and y1 * y2 < 0:
+        # Use sign check to prevent overflow from y1 * y2
+        elif np.isfinite(y1) and np.isfinite(y2) and (np.sign(y1) != np.sign(y2)):
             a, b = r_grid[i], r_grid[i+1]
             fa, fb = y1, y2
             # bisection

@@ -367,7 +367,7 @@ class App(ctk.CTk):
             modelo_df = cf.generar_modelo_financiero_detallado(params, capex, deuda, monto_deuda)
 
             fcf_proyecto = modelo_df["FCF No Apalancado (FCFF)"]
-            fcf_inversionista = modelo_df["Flujo Caja Neto Inversionista"]
+            fcf_inversionista = modelo_df["FCF Apalancado (FCFE)"]
 
             # DEBUGGING: Imprimir diagnostico de flujos
             print("\n--- DIAGNÓSTICO DE FLUJOS (GUI) ---")
@@ -523,7 +523,7 @@ class App(ctk.CTk):
                 cpx = cf.construir_cronograma_inversiones(p)
                 deu = cf.crear_tabla_amortizacion(p, mto_d)
                 mod = cf.generar_modelo_financiero_detallado(p, cpx, deu, mto_d)
-                flj = mod["Flujo Caja Neto Inversionista"]
+                flj = mod["FCF Apalancado (FCFE)"]
                 ke = p["financiamiento"]["costo_capital_propio_anual"]
                 res.append({"Variable": var_name, "Var": f"{v:+.0%}", "VAN": cf.VAN(flj, ke), "TIR": cf.TIR_anual(flj)})
         
