@@ -26,25 +26,25 @@ parametros = {
     "planes_venta": [
         {
             "nombre": "Preventa",
-            "tipo": "Dinámico",
-            "mes_inicio": 1,
             "cantidad_lotes": 100,
             "velocidad": 5,
             "monto_pie": 30000,
             "monto_cuota": 2000,
             "frecuencia": 1,
-            "cantidad_cuotas": 60
+            "cantidad_cuotas": 60,
+            "tipo": "Dinámico",
+            "mes_inicio": 1
         },
         {
             "nombre": "Venta Normal",
-            "tipo": "Dinámico",
-            "mes_inicio": 20,
             "cantidad_lotes": 100,
             "velocidad": 3,
             "monto_pie": 50000,
             "monto_cuota": 3000,
             "frecuencia": 1,
-            "cantidad_cuotas": 48
+            "cantidad_cuotas": 48,
+            "tipo": "Dinámico",
+            "mes_inicio": 1
         }
     ],
     "costos_operativos": {
@@ -147,20 +147,13 @@ def generar_modelo_financiero_detallado(p, capex, tabla_amortizacion, monto_deud
     ]
     df = pd.DataFrame(0.0, index=range(horizonte + 1), columns=columnas)
     
-    # --- Inicialización de Deuda y CAPEX ---
+    # Deuda y CAPEX
     df["CAPEX"] = -capex.reindex(df.index, fill_value=0.0)
     if tabla_amortizacion is not None:
         df["Intereses"] = tabla_amortizacion["Interés"].reindex(df.index, fill_value=0.0)
         df["Amortización Principal"] = -tabla_amortizacion["Principal"].reindex(df.index, fill_value=0.0)
         df["Saldo Deuda"] = tabla_amortizacion["Saldo Pendiente"].reindex(df.index, fill_value=0.0)
-        # El saldo en t=0 es el monto total a desembolsar
-        df.loc[0, "Saldo Deuda"] = monto_deuda_total
-
     df.loc[0, "Entrada Deuda"] = monto_deuda_total
-    df.loc[0, "Net Debt Issued"] = monto_deuda_total
-    df.loc[0, "FCF No Apalancado (FCFF)"] = df.loc[0, "CAPEX"]
-    df.loc[0, "FCF Apalancado (FCFE)"] = df.loc[0, "FCF No Apalancado (FCFF)"] + df.loc[0, "Net Debt Issued"]
-    df.loc[0, "Flujo Caja Neto Inversionista"] = df.loc[0, "FCF Apalancado (FCFE)"]
     
     # Lotes Totales
     total_lotes = sum(plan["cantidad_lotes"] for plan in p.get("planes_venta", []))
@@ -260,16 +253,16 @@ def generar_modelo_financiero_detallado(p, capex, tabla_amortizacion, monto_deud
         df.loc[mes, "Net Debt Issued"] = df.loc[mes, "Entrada Deuda"] + df.loc[mes, "Amortización Principal"]
         df.loc[mes, "FCF Apalancado (FCFE)"] = df.loc[mes, "FCF No Apalancado (FCFF)"] + df.loc[mes, "Net Debt Issued"]
         
-        df.loc[mes, "Flujo Caja Neto Inversionista"] = df.loc[mes, "FCF Apalancado (FCFE)"]
+        capital_aportado = 0
+        if mes == 1:
+            capital_inv = abs(df.loc[0, "CAPEX"]) - df.loc[0, "Entrada Deuda"]
+            capital_aportado = max(0, capital_inv)
+        
+        df.loc[mes, "Aportación Capital"] = capital_aportado
+        df.loc[mes, "Flujo Caja Neto Inversionista"] = df.loc[mes, "FCF Apalancado (FCFE)"] - capital_aportado
 
-    # Métricas de rentabilidad basadas en el flujo del inversionista
-    flujo_inv = df["Flujo Caja Neto Inversionista"]
-    # La inversión total de equity es la suma de todos los flujos negativos
-    equity_invertido = abs(flujo_inv[flujo_inv < 0].sum())
-    total_retornado = flujo_inv[flujo_inv > 0].sum()
-    
-    df.attrs["roi_estatico"] = (total_retornado - equity_invertido) / equity_invertido if equity_invertido > 0 else 0
-    df.attrs["multiplo_capital"] = (total_retornado / equity_invertido) if equity_invertido > 0 else 0
+    df.attrs["roi_estatico"] = (df["Utilidad Neta"].sum() / abs(df.loc[0, "CAPEX"])) if abs(df.loc[0, "CAPEX"]) != 0 else 0
+    df.attrs["multiplo_capital"] = (df["Flujo Caja Neto Inversionista"].sum() + df.loc[1, "Aportación Capital"]) / df.loc[1, "Aportación Capital"] if df.loc[1, "Aportación Capital"] != 0 else 0
     
     return df
 
@@ -277,128 +270,116 @@ def generar_modelo_financiero_detallado(p, capex, tabla_amortizacion, monto_deud
 # 4. FUNCIONES DE MÉTRICAS FINANCIERAS
 # ==============================================================================
 
-def calculateIRR(cashFlows):
+def _resolver_tir(flujos, iteraciones=100):
     """
-    Implementa el cálculo de la TIR según el estándar fintech inmobiliario.
+    Resuelve la Tasa Interna de Retorno (TIR) usando las raíces del polinomio
+    del Valor Presente Neto (VPN).
+    
+    VPN = C0 + C1/(1+r) + C2/(1+r)^2 + ... + Cn/(1+r)^n = 0
+    Haciendo x = 1/(1+r), tenemos:
+    C0 + C1*x + C2*x^2 + ... + Cn*x^n = 0
+    
+    Se usa numpy.roots para hallar x, y luego se despeja r = (1/x) - 1.
     """
-    flujos = np.array(cashFlows, dtype=float)
-    n = len(flujos)
+    flujos = np.array(flujos, dtype=float)
     
-    res_error = {
-        "tir_mensual": None,
-        "tir_anual_equivalente": None,
-        "cash_flows": flujos.tolist(),
-        "converged": False
-    }
+    # Validaciones básicas
+    if len(flujos) == 0:
+        print("DEBUG TIR: Flujos vacíos.")
+        return None
+    # Debe haber al menos un positivo y un negativo
+    if not (np.any(flujos > 0) and np.any(flujos < 0)):
+        print(f"DEBUG TIR: Flujos sin cambio de signo. Min: {flujos.min()}, Max: {flujos.max()}")
+        return None
 
-    if n == 0: return res_error
-    
-    pos_flows = flujos[flujos > 0]
-    neg_flows = flujos[flujos < 0]
-    
-    if len(pos_flows) == 0 or len(neg_flows) == 0:
-        return res_error
+    try:
+        # np.roots espera coeficientes de mayor a menor potencia: [Cn, ..., C1, C0]
+        # Nuestros flujos son [C0, C1, ..., Cn].
+        # El polinomio es C0 + C1*x + ... + Cn*x^n.
+        # Por lo tanto, los coeficientes en orden descendente de potencia son flujos invertidos.
+        coeffs = flujos[::-1]
         
-    if np.sum(pos_flows) <= abs(np.sum(neg_flows)):
-        return res_error
-
-    def calcular_van(tasa):
-        if tasa <= -1.0: return np.inf
-        try:
-            with np.errstate(all='ignore'):
-                t = np.arange(n)
-                factores = (1.0 + tasa) ** (-t)
-                van = np.sum(flujos * factores)
-                return van if np.isfinite(van) else (np.inf if van > 0 else -np.inf)
-        except:
-            return np.nan
-
-    # Bracketing y Bisección por rangos
-    # Priorizamos encontrar la raíz más cercana a 0 que sea financieramente lógica
-    r_found = False
-    res_is_cash_out = False
-    
-    # 1. Caso Especial: Cash-Out Inicial (Rentabilidad potencialmente infinita o no definida tradicionalmente)
-    # Si el primer flujo es positivo y la suma total es positiva, es un Cash-Out.
-    if flujos[0] > 0 and np.sum(flujos) > 0:
-        return {
-            "tir_mensual": 10.0, # Representamos como 1000% mensual (límite)
-            "tir_anual_equivalente": float((1 + 10.0) ** 12 - 1),
-            "cash_flows": flujos.tolist(),
-            "converged": True,
-            "is_cash_out": True
-        }
-
-    # 2. Búsqueda de bracket en múltiples puntos para manejar multi-raíz por apalancamiento
-    # Probamos una malla de puntos desde -99% hasta 500% mensual
-    puntos = np.concatenate([
-        np.linspace(-0.99, -0.1, 10),
-        np.linspace(-0.1, 1.0, 20),
-        np.linspace(1.0, 10.0, 10)
-    ])
-    
-    for i in range(len(puntos) - 1):
-        low, high = puntos[i], puntos[i+1]
-        v_low = calcular_van(low)
-        v_high = calcular_van(high)
+        # Calcular raíces
+        roots = np.roots(coeffs)
         
-        if np.isfinite(v_low) and np.isfinite(v_high) and np.sign(v_low) != np.sign(v_high):
-            # Encontramos un bracket! Bisección
-            for _ in range(100):
-                mid = (low + high) / 2.0
-                v_mid = calcular_van(mid)
+        # Filtrar raíces reales
+        real_roots = roots[np.isreal(roots)].real
+        
+        # x = 1/(1+r). Si r > -1 (tasa razonable), entonces x > 0.
+        positive_roots = real_roots[real_roots > 0]
+        
+        if len(positive_roots) == 0:
+            print("DEBUG TIR: No se encontraron raíces positivas (x > 0).")
+            return None
+        
+        # Convertir a tasas: r = (1/x) - 1
+        rates = (1.0 / positive_roots) - 1.0
+        
+        # Validar tasas razonables (ej. > -0.99 para evitar -100%)
+        # Ampliamos filtro inferior por si es una pérdida casi total
+        valid_rates = rates[rates > -0.9999]
+        
+        if len(valid_rates) == 0:
+            print(f"DEBUG TIR: Todas las tasas filtradas por ser < -99.99%. Tasas crudas: {rates}")
+            return None
+        
+        # Filtrar tasas excesivamente altas (ej. > 100% mensual)
+        # Esto evita tasas astronómicas que resultan de raíces espurias cercanas a 0.
+        final_rates = valid_rates[valid_rates < 1.0]
+        
+        if len(final_rates) == 0:
+             print(f"DEBUG TIR: Todas las tasas filtradas por ser > 100% mensual. Tasas válidas: {valid_rates}")
+             return None
+
+        # Si hay múltiples soluciones lógicas, buscamos la que dé el VAN más cercano a cero
+        # Y preferimos la tasa más cercana a 0 (más realista) si el error de VAN es similar.
+        best_rate = None
+        min_van_error = float('inf')
+        
+        # Pre-cálculo para VAN rápido
+        t = np.arange(len(flujos))
+        
+        for r in final_rates:
+            try:
+                # Calcular VAN para esta tasa
+                factor = 1.0 + r
+                # Evitar overflow en potencias grandes
+                denom = factor ** t
+                van = np.sum(flujos / denom)
                 
-                if not np.isfinite(v_mid):
-                    mid = low + (high - low) * 0.1
-                    v_mid = calcular_van(mid)
-
-                if abs(v_mid) < 1e-4: # Tolerancia relajada para flujos grandes
-                    low = mid
-                    r_found = True
-                    break
+                # Check error
+                err = abs(van)
+                if err < min_van_error:
+                    min_van_error = err
+                    best_rate = r
+            except:
+                continue
                 
-                if np.sign(v_low) != np.sign(v_mid):
-                    high = mid
-                    v_high = v_mid
-                else:
-                    low = mid
-                    v_low = v_mid
-            
-            if r_found: break
+        return best_rate
 
-    if not r_found:
-        return res_error
-
-    tir_m = low
-    # Validación final: El VAN debe ser pequeño relativo a la magnitud de los flujos
-    van_final = calcular_van(tir_m)
-    magnitud_flujos = np.abs(flujos).max()
-    if not np.isfinite(van_final) or (abs(van_final) / magnitud_flujos > 1e-3):
-        return res_error
-        
-    # Detectar cambios de signo para advertencia de multiplicidad
-    sign_changes = 0
-    last_sign = 0
-    for f in flujos:
-        if abs(f) > 1e-4:
-            current_sign = np.sign(f)
-            if last_sign != 0 and current_sign != last_sign:
-                sign_changes += 1
-            last_sign = current_sign
-
-    return {
-        "tir_mensual": float(tir_m),
-        "tir_anual_equivalente": float((1 + tir_m) ** 12 - 1),
-        "cash_flows": flujos.tolist(),
-        "converged": True,
-        "multiple_roots_possible": bool(sign_changes > 1),
-        "is_cash_out": False
-    }
+    except Exception as e:
+        print(f"DEBUG TIR: Error en cálculo: {str(e)}")
+        return None
 
 def TIR_anual(flujos):
-    """Mantiene compatibilidad con el resto del código."""
-    res = calculateIRR(flujos)
-    return res["tir_anual_equivalente"] if res["converged"] else None
+    try:
+        # IRR is only meaningful if there is at least one positive and one negative cash flow
+        flujos_validos = flujos.values if isinstance(flujos, pd.Series) else flujos
+        if not (any(f > 0 for f in flujos_validos) and any(f < 0 for f in flujos_validos)):
+            return None
+            
+        # Resolver la TIR mensual usando el método de Newton-Raphson
+        tir_m = _resolver_tir(flujos_validos)
+
+        # Si no se encuentra raíz, retornar None
+        if tir_m is None or not np.isfinite(tir_m):
+            return None
+            
+        # Anualizar la TIR mensual
+        return (1 + tir_m) ** 12 - 1
+    except Exception:
+        # If any other unexpected error occurs, return None
+        return None
 
 def VAN(flujos, tasa_descuento_anual):
     """
@@ -414,15 +395,7 @@ def VAN(flujos, tasa_descuento_anual):
 def WACC(p):
     cfg_fin = p["financiamiento"]
     kd, ke = cfg_fin["costo_deuda_anual"], cfg_fin["costo_capital_propio_anual"]
-    
-    # Si no existe porcentaje_deuda, calcularlo dinámicamente
-    if "porcentaje_deuda" in cfg_fin:
-        wd = cfg_fin["porcentaje_deuda"]
-    else:
-        inv_total = calcular_inversion_total(p)
-        monto_d = cfg_fin.get("monto_deuda", 0)
-        wd = monto_d / inv_total if inv_total > 0 else 0
-        
+    wd = p["financiamiento"]["porcentaje_deuda"]
     we = 1 - wd
     t = cfg_fin["tasa_impuesto_renta"]
     return (we * ke) + (wd * kd * (1 - t)) if wd > 0 else ke
@@ -439,7 +412,7 @@ def analisis_de_sensibilidad(p_base):
     escenarios = {
         "Crecimiento Precio": ("ventas", "crecimiento_precio_anual"),
         "Tasa Préstamo": ("financiamiento", "costo_deuda_anual"),
-        "Monto Préstamo": ("financiamiento", "monto_deuda"),
+        "OPEX Mensual": ("costos_operativos", "costo_operativo_mensual"),
     }
     variaciones = [-0.20, -0.10, 0.0, 0.10, 0.20]
     resultados_sensibilidad = []
@@ -458,7 +431,7 @@ def analisis_de_sensibilidad(p_base):
 
             # Re-correr el modelo con los nuevos parámetros
             inv_total_test = calcular_inversion_total(p_test)
-            monto_deuda_test = p_test["financiamiento"]["monto_deuda"]
+            monto_deuda_test = inv_total_test * p_test["financiamiento"]["porcentaje_deuda"]
             capex_test = construir_cronograma_inversiones(p_test)
             deuda_test = crear_tabla_amortizacion(p_test, monto_deuda_test)
             modelo_test = generar_modelo_financiero_detallado(p_test, capex_test, deuda_test, monto_deuda_test)

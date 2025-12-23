@@ -224,6 +224,18 @@ class App(ctk.CTk):
         ctk.CTkLabel(planes_frame, text="Planes de Venta (Inmobiliaria)", font=ctk.CTkFont(weight="bold")).pack()
         
         self.planes_tree = self._create_treeview(planes_frame, ["Nombre", "Tipo", "Mes Ini", "Lotes", "Vel.", "Pie", "Cuota", "Freq", "Cant"], height=4)
+        for p_v in params.get("planes_venta", []):
+            self.planes_tree.insert("", "end", values=(
+                p_v["nombre"],
+                p_v.get("tipo", "Dinámico"),
+                p_v.get("mes_inicio", 1),
+                p_v["cantidad_lotes"],
+                p_v.get("velocidad", 0),
+                p_v["monto_pie"],
+                p_v["monto_cuota"],
+                p_v["frecuencia"],
+                p_v["cantidad_cuotas"]
+            ))
         
         planes_btn_frame = ctk.CTkFrame(planes_frame)
         planes_btn_frame.pack(pady=5)
@@ -348,6 +360,7 @@ class App(ctk.CTk):
             monto_deuda = params["financiamiento"]["monto_deuda"]
             monto_equity = inv_total - monto_deuda
             porc_deuda = monto_deuda / inv_total if inv_total > 0 else 0
+            params["financiamiento"]["porcentaje_deuda"] = porc_deuda
             
             capex = cf.construir_cronograma_inversiones(params)
             deuda = cf.crear_tabla_amortizacion(params, monto_deuda)
@@ -356,33 +369,44 @@ class App(ctk.CTk):
             fcf_proyecto = modelo_df["FCF No Apalancado (FCFF)"]
             fcf_inversionista = modelo_df["Flujo Caja Neto Inversionista"]
 
+            # DEBUGGING: Imprimir diagnostico de flujos
+            print("\n--- DIAGNÓSTICO DE FLUJOS (GUI) ---")
+            print(f"FCF Proyecto: Sum={fcf_proyecto.sum():,.2f}, Min={fcf_proyecto.min():,.2f}, Max={fcf_proyecto.max():,.2f}")
+            print(f"FCF Inversionista: Sum={fcf_inversionista.sum():,.2f}, Min={fcf_inversionista.min():,.2f}, Max={fcf_inversionista.max():,.2f}")
+            print(f"Deuda Total Input: {params['financiamiento']['monto_deuda']:,.2f}")
+            print(f"Inversión Total: {inv_total:,.2f}")
+            print("-----------------------------------")
+
             wacc = cf.WACC(params)
             ke = params["financiamiento"]["costo_capital_propio_anual"]
             
             van_p = cf.VAN(fcf_proyecto, wacc)
-            res_tir_p = cf.calculateIRR(fcf_proyecto)
+            tir_p = cf.TIR_anual(fcf_proyecto)
             van_i = cf.VAN(fcf_inversionista, ke)
-            res_tir_i = cf.calculateIRR(fcf_inversionista)
+            tir_i = cf.TIR_anual(fcf_inversionista)
 
-            roi_total = modelo_df.attrs.get("roi_estatico", 0)
-            multiplo = modelo_df.attrs.get("multiplo_capital", 0)
-
-            # Formateo de TIR con advertencias
-            def format_tir(res):
-                if not res["converged"]: return "N/A"
-                if res.get("is_cash_out"): return "Cash-Out"
-                txt = f"{res['tir_anual_equivalente']:.2%}"
-                if res.get("multiple_roots_possible"): txt += " *"
-                return txt
+            # Cálculo de Métricas Adicionales (ROI y Múltiplo)
+            flujos_inv = fcf_inversionista.values
+            
+            # El capital total invertido es la suma de todas las salidas (aportaciones de capital)
+            # En este modelo, el equity total se aporta en t=0 (monto_equity)
+            # Pero si hubiera cash calls, se reflejarían como flujos negativos.
+            inversion_total_equity = monto_equity
+            
+            # Total retornado es la suma de todas las distribuciones positivas
+            total_retornado = sum(f for f in flujos_inv if f > 0)
+            
+            multiplo = total_retornado / inversion_total_equity if inversion_total_equity > 0 else 0
+            roi_total = (total_retornado - inversion_total_equity) / inversion_total_equity if inversion_total_equity > 0 else 0
 
             # Actualizar GUI
             self.base_results_labels["inv_total"].configure(text=f"$ {inv_total:,.0f}")
             self.base_results_labels["capital_requerido"].configure(text=f"$ {monto_equity:,.0f}")
             self.base_results_labels["wacc"].configure(text=f"{wacc:.2%}")
             self.base_results_labels["van_proyecto"].configure(text=f"$ {van_p:,.0f}")
-            self.base_results_labels["tir_proyecto"].configure(text=format_tir(res_tir_p))
+            self.base_results_labels["tir_proyecto"].configure(text=f"{tir_p:.2%}" if tir_p is not None else "N/A")
             self.base_results_labels["van_inversionista"].configure(text=f"$ {van_i:,.0f}")
-            self.base_results_labels["tir_inversionista"].configure(text=format_tir(res_tir_i))
+            self.base_results_labels["tir_inversionista"].configure(text=f"{tir_i:.2%}" if tir_i is not None else "N/A")
             self.base_results_labels["roi_total"].configure(text=f"{roi_total:.2%}")
             self.base_results_labels["multiplo_capital"].configure(text=f"{multiplo:.2f}x")
 
