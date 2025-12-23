@@ -108,6 +108,7 @@ class App(ctk.CTk):
         self.output_tabview.add("Resumen")
         self.output_tabview.add("Proyección Operativa")
         self.output_tabview.add("Detalle Deuda")
+        self.output_tabview.add("Detalle Payback")
         self.output_tabview.add("Sensibilidad VAN")
         self.output_tabview.add("Sensibilidad TIR")
 
@@ -164,6 +165,24 @@ class App(ctk.CTk):
         self.total_amort_label.pack(side="left", padx=20)
 
         self.deuda_tree = self._create_treeview(deuda_frame, ["Mes", "Saldo Inicial", "Intereses", "Amortización", "Saldo Final"])
+        
+        # --- Pestaña de Detalle Payback ---
+        payback_frame = self.output_tabview.tab("Detalle Payback")
+        ctk.CTkLabel(payback_frame, text="Análisis Detallado de Recupero de Inversión", font=ctk.CTkFont(weight="bold")).pack(pady=5)
+        
+        # Resumen de Payback (Totalizadores)
+        self.payback_summary_frame = ctk.CTkFrame(payback_frame)
+        self.payback_summary_frame.pack(pady=5, padx=20, fill="x")
+        
+        self.payback_normal_label = ctk.CTkLabel(self.payback_summary_frame, text="Payback Normal: -", font=ctk.CTkFont(weight="bold", size=14))
+        self.payback_normal_label.pack(side="left", padx=20)
+        
+        self.payback_desc_label = ctk.CTkLabel(self.payback_summary_frame, text="Payback Descontado: -", font=ctk.CTkFont(weight="bold", size=14))
+        self.payback_desc_label.pack(side="left", padx=20)
+        
+        self.payback_tree = self._create_treeview(payback_frame, [
+            "Mes", "Flujo Mensual", "Acum. Normal", "Flujo Descontado", "Acum. Descontado", "Estado"
+        ])
         
         # --- Pestaña de Proyección Operativa ---
         proy_frame = self.output_tabview.tab("Proyección Operativa")
@@ -438,7 +457,10 @@ class App(ctk.CTk):
             # 5. Actualizar Detalle de Deuda
             self._update_deuda_treeview(modelo_df)
             
-            # 6. Actualizar Proyección Operativa
+            # 6. Actualizar Detalle Payback
+            self._update_payback_treeview(fcf_inversionista, wacc, payback_n, payback_d)
+            
+            # 7. Actualizar Proyección Operativa
             self._update_proy_treeview(modelo_df)
             
             messagebox.showinfo("Éxito", "Análisis financiero completado.")
@@ -521,6 +543,68 @@ class App(ctk.CTk):
         
         self.total_interes_label.configure(text=f"Total Intereses: $ {total_interes:,.0f}")
         self.total_amort_label.configure(text=f"Total Amortización: $ {total_amort:,.0f}")
+
+    def _update_payback_treeview(self, flujos, tasa_anual, payback_n, payback_d):
+        """Actualiza la tabla de detalle de payback con análisis mes a mes."""
+        for item in self.payback_tree.get_children():
+            self.payback_tree.delete(item)
+        
+        # Actualizar labels de resumen
+        if payback_n is not None:
+            self.payback_normal_label.configure(text=f"Payback Normal: {payback_n:.2f} meses")
+        else:
+            self.payback_normal_label.configure(text="Payback Normal: No se recupera")
+            
+        if payback_d is not None:
+            self.payback_desc_label.configure(text=f"Payback Descontado: {payback_d:.2f} meses")
+        else:
+            self.payback_desc_label.configure(text="Payback Descontado: No se recupera")
+        
+        # Calcular flujos acumulados mes a mes
+        flujos_valores = flujos.values if hasattr(flujos, "values") else list(flujos)
+        tasa_mensual = (1 + tasa_anual) ** (1 / 12) - 1
+        
+        acum_normal = 0.0
+        acum_desc = 0.0
+        recuperado_normal = False
+        recuperado_desc = False
+        
+        for mes in range(len(flujos_valores)):
+            flujo = flujos_valores[mes]
+            flujo_desc = flujo / ((1 + tasa_mensual) ** mes)
+            
+            acum_normal += flujo
+            acum_desc += flujo_desc
+            
+            # Determinar estado
+            estado = ""
+            if not recuperado_normal and acum_normal >= 0:
+                estado = "✓ Recupero Normal"
+                recuperado_normal = True
+            elif not recuperado_desc and acum_desc >= 0:
+                estado = "✓ Recupero Desc."
+                recuperado_desc = True
+            elif recuperado_normal and recuperado_desc:
+                estado = "✓ Ambos"
+            
+            # Mostrar solo hasta unos meses después de la recuperación o primeros/últimos meses
+            mostrar = (
+                mes <= 5 or  # Primeros meses
+                (payback_n is not None and abs(mes - payback_n) <= 3) or  # Cerca del payback normal
+                (payback_d is not None and abs(mes - payback_d) <= 3) or  # Cerca del payback descontado
+                mes >= len(flujos_valores) - 3  # Últimos meses
+            )
+            
+            if mostrar or estado:
+                self.payback_tree.insert("", "end", values=(
+                    mes,
+                    f"$ {flujo:,.0f}",
+                    f"$ {acum_normal:,.0f}",
+                    f"$ {flujo_desc:,.0f}",
+                    f"$ {acum_desc:,.0f}",
+                    estado
+                ))
+
 
     def _run_sensitivity_analysis(self, p_base):
         escenarios = {
