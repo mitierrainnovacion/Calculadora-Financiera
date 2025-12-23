@@ -289,129 +289,157 @@ def generar_modelo_financiero_detallado(p, capex, tabla_amortizacion, monto_deud
 # 4. FUNCIONES DE MÉTRICAS FINANCIERAS
 # ==============================================================================
 
-def _resolver_tir(flujos, iteraciones=100):
+def _npv_at_rate(flujos, r):
     """
-    Resuelve la Tasa Interna de Retorno (TIR) usando las raíces del polinomio
-    del Valor Presente Neto (VPN).
-    
-    VPN = C0 + C1/(1+r) + C2/(1+r)^2 + ... + Cn/(1+r)^n = 0
-    Haciendo x = 1/(1+r), tenemos:
-    C0 + C1*x + C2*x^2 + ... + Cn*x^n = 0
-    
-    Se usa numpy.roots para hallar x, y luego se despeja r = (1/x) - 1.
+    Evaluate NPV for monthly rate r. r must be > -1 (denominator positive for t>=0).
     """
-    flujos = np.array(flujos, dtype=float)
-    
-    # Validaciones básicas
-    if len(flujos) == 0:
-        print("DEBUG TIR: Flujos vacíos.")
+    flujos_valores = flujos.values if hasattr(flujos, "values") else list(flujos)
+    denom_base = 1.0 + r
+    if denom_base <= 0:
+        s = 0.0
+        for t, cf in enumerate(flujos_valores):
+            denom = (1.0 + r) ** t
+            if denom == 0:
+                # avoid division by zero
+                return float('inf') if cf > 0 else -float('inf')
+            s += cf / denom
+        return s
+    else:
+        t = np.arange(len(flujos_valores))
+        return float(np.sum(np.array(flujos_valores) / (denom_base ** t)))
+
+
+def _find_roots_by_bracketing(flujos, r_min=-0.9999, r_max=5.0, steps=2000, tol=1e-8, maxiter=200):
+    """
+    Scan r grid to find NPV sign-change intervals and apply bisection in each.
+    Returns a list of monthly roots found.
+    """
+    r_grid = np.linspace(r_min, r_max, steps)
+    npv_grid = np.array([_npv_at_rate(flujos, r) for r in r_grid])
+
+    roots = []
+    for i in range(len(r_grid) - 1):
+        y1, y2 = npv_grid[i], npv_grid[i+1]
+        if np.isfinite(y1) and np.isfinite(y2) and y1 == 0:
+            roots.append(r_grid[i])
+        elif np.isfinite(y1) and np.isfinite(y2) and y1 * y2 < 0:
+            a, b = r_grid[i], r_grid[i+1]
+            fa, fb = y1, y2
+            # bisection
+            for _ in range(maxiter):
+                c = 0.5 * (a + b)
+                fc = _npv_at_rate(flujos, c)
+                if not np.isfinite(fc):
+                    # shrink interval
+                    a = 0.5*(a+c)
+                    b = 0.5*(b+c)
+                    continue
+                if abs(fc) <= tol or (b - a) / 2.0 < tol:
+                    roots.append(c)
+                    break
+                if fa * fc < 0:
+                    b, fb = c, fc
+                else:
+                    a, fa = c, fc
+            else:
+                roots.append(c)
+    return roots
+
+def _resolver_tir(flujos):
+    """
+    Robust IRR resolver returning a single monthly IRR or None.
+    Strategy:
+      - Validate cash flows (at least one positive and one negative).
+      - Find all real roots via bracketing/bisection.
+      - If multiple roots, prefer the root with smallest abs(NPV) and penalize unrealistic extremes.
+    """
+    flujos_list = flujos.values if hasattr(flujos, "values") else list(flujos)
+    if len(flujos_list) == 0:
         return None
-    # Debe haber al menos un positivo y un negativo
-    if not (np.any(flujos > 0) and np.any(flujos < 0)):
-        print(f"DEBUG TIR: Flujos sin cambio de signo. Min: {flujos.min()}, Max: {flujos.max()}")
-        return None
-
-    try:
-        # np.roots espera coeficientes de mayor a menor potencia: [Cn, ..., C1, C0]
-        # Nuestros flujos son [C0, C1, ..., Cn].
-        # El polinomio es C0 + C1*x + ... + Cn*x^n.
-        # Por lo tanto, los coeficientes en orden descendente de potencia son flujos invertidos.
-        coeffs = flujos[::-1]
-        
-        # Calcular raíces
-        roots = np.roots(coeffs)
-        
-        # Filtrar raíces reales
-        real_roots = roots[np.isreal(roots)].real
-        
-        # x = 1/(1+r). Si r > -1 (tasa razonable), entonces x > 0.
-        positive_roots = real_roots[real_roots > 0]
-        
-        if len(positive_roots) == 0:
-            print("DEBUG TIR: No se encontraron raíces positivas (x > 0).")
-            return None
-        
-        # Convertir a tasas: r = (1/x) - 1
-        rates = (1.0 / positive_roots) - 1.0
-        
-        # Validar tasas razonables (ej. > -0.99 para evitar -100%)
-        # Ampliamos filtro inferior por si es una pérdida casi total
-        valid_rates = rates[rates > -0.9999]
-        
-        if len(valid_rates) == 0:
-            print(f"DEBUG TIR: Todas las tasas filtradas por ser < -99.99%. Tasas crudas: {rates}")
-            return None
-        
-        # Filtrar tasas excesivamente altas (ej. > 100% mensual)
-        # Esto evita tasas astronómicas que resultan de raíces espurias cercanas a 0.
-        final_rates = valid_rates[valid_rates < 1.0]
-        
-        if len(final_rates) == 0:
-             print(f"DEBUG TIR: Todas las tasas filtradas por ser > 100% mensual. Tasas válidas: {valid_rates}")
-             return None
-
-        # Si hay múltiples soluciones lógicas, buscamos la que dé el VAN más cercano a cero
-        # Y preferimos la tasa más cercana a 0 (más realista) si el error de VAN es similar.
-        best_rate = None
-        min_van_error = float('inf')
-        
-        # Pre-cálculo para VAN rápido
-        t = np.arange(len(flujos))
-        
-        for r in final_rates:
-            try:
-                # Calcular VAN para esta tasa
-                factor = 1.0 + r
-                # Evitar overflow en potencias grandes
-                denom = factor ** t
-                van = np.sum(flujos / denom)
-                
-                # Check error
-                err = abs(van)
-                if err < min_van_error:
-                    min_van_error = err
-                    best_rate = r
-            except:
-                continue
-                
-        return best_rate
-
-    except Exception as e:
-        print(f"DEBUG TIR: Error en cálculo: {str(e)}")
+    if not (any(f > 0 for f in flujos_list) and any(f < 0 for f in flujos_list)):
         return None
 
-def TIR_anual(flujos):
-    try:
-        # IRR is only meaningful if there is at least one positive and one negative cash flow
-        flujos_validos = flujos.values if isinstance(flujos, pd.Series) else flujos
-        if not (any(f > 0 for f in flujos_validos) and any(f < 0 for f in flujos_validos)):
-            return None
-            
-        # Resolver la TIR mensual usando el método de Newton-Raphson
-        tir_m = _resolver_tir(flujos_validos)
+    roots = _find_roots_by_bracketing(flujos_list, r_min=-0.9999, r_max=5.0, steps=2000, tol=1e-8)
 
-        # Si no se encuentra raíz, retornar None
-        if tir_m is None or not np.isfinite(tir_m):
-            return None
-            
-        # Anualizar la TIR mensual
-        return (1 + tir_m) ** 12 - 1
-    except Exception:
-        # If any other unexpected error occurs, return None
+    feasible = [r for r in roots if np.isfinite(r) and r > -0.9999]
+    if len(feasible) == 0:
         return None
 
-def VAN(flujos, tasa_descuento_anual, periodo_meses=1):
+    best_r = None
+    best_score = float('inf')
+    for r in feasible:
+        err = abs(_npv_at_rate(flujos_list, r))
+        # penalize astronomically large rates (optional)
+        penalty = 0.0 if -0.99 < r < 10 else 1.0
+        score = err + penalty * 1e6
+        if score < best_score:
+            best_score = score
+            best_r = r
+
+    return best_r
+
+def TIR_anual(flujos, return_structure=False):
+    """
+    Calculate monthly IRR and annual equivalent.
+
+    If return_structure is True return a dict with metadata.
+    Otherwise return tir_anual_equivalente (float) or None.
+    """
+    flujos_list = flujos.values if hasattr(flujos, "values") else list(flujos)
+    result = {
+        "tir_mensual": None,
+        "tir_anual_equivalente": None,
+        "cash_flows": flujos_list,
+        "converged": False,
+        "notes": ""
+    }
+
+    if len(flujos_list) == 0:
+        result["notes"] = "Empty cash flow"
+        return result if return_structure else None
+
+    if not (any(f > 0 for f in flujos_list) and any(f < 0 for f in flujos_list)):
+        result["notes"] = "Cash flow must have at least one positive and one negative value"
+        return result if return_structure else None
+
+    tir_m = _resolver_tir(flujos_list)
+    if tir_m is None or not np.isfinite(tir_m) or tir_m <= -1:
+        result["notes"] = "IRR solver did not converge or returned infeasible rate"
+        return result if return_structure else None
+
+    tir_anual = (1.0 + tir_m) ** 12.0 - 1.0
+    result["tir_mensual"] = tir_m
+    result["tir_anual_equivalente"] = tir_anual
+    result["converged"] = True
+    return result if return_structure else tir_anual
+
+def VAN(flujos, tasa_descuento_anual, annual_rate_is_effective=True, periodo_meses=1):
     """
     Calcula el Valor Actual Neto (VAN).
-    - `tasa_descuento_anual` se interpreta como tasa efectiva anual (EAR).
-    - `periodo_meses` define la periodicidad de los flujos (por defecto 1 => mensual).
+
+    Parameters:
+      flujos: iterable of cash flows
+      tasa_descuento_anual: annual discount rate (float)
+      annual_rate_is_effective: if True, treat tasa_descuento_anual as effective annual rate (EAR).
+                               If False, treat as nominal APR (divide by 12).
+      periodo_meses: duration of each period in the flows (default 1 = monthly).
     """
-    # Convertir tasa anual efectiva a tasa por período
-    tasa_periodica = (1 + tasa_descuento_anual) ** (periodo_meses / 12.0) - 1
+    flujos_valores = flujos.values if hasattr(flujos, "values") else list(flujos)
+
+    # 1. Calculate Monthly Effective Rate
+    if annual_rate_is_effective:
+        tasa_mensual = (1.0 + tasa_descuento_anual) ** (1.0 / 12.0) - 1.0
+    else:
+        # standard convention: nominal / 12
+        tasa_mensual = tasa_descuento_anual / 12.0
+
+    # 2. Adjust for period length
+    # If flows are every `periodo_meses`, the discount factor per step is (1 + tasa_mensual)**periodo_meses
+    factor_periodo = (1.0 + tasa_mensual) ** periodo_meses
+    
     val_actual = 0.0
-    flujos_valores = flujos.values if isinstance(flujos, pd.Series) else np.asarray(flujos, dtype=float)
     for t, cf in enumerate(flujos_valores):
-        val_actual += cf / ((1 + tasa_periodica) ** t)
+        val_actual += cf / (factor_periodo ** t)
     return val_actual
 
 def WACC(p):

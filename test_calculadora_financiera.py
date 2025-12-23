@@ -148,5 +148,42 @@ class TestCalculadoraFinanciera(unittest.TestCase):
         # -1000 + 1010 / 1.01 = -1000 + 1000 = 0
         self.assertAlmostEqual(van_monthly, 0.0)
 
+
+    def test_van_ear_consistency(self):
+        """
+        Test that VAN uses Effective Annual Rate conversion correctly.
+        """
+        from calculadora_financiera import VAN
+        # If rate is 10% annual EAR, monthly rate is (1.10)^(1/12) - 1.
+        # Flow: -100 at t=0, +110 at t=12.
+        # PV = -100 + 110 / (1+r)^12 = -100 + 110 / 1.10 = 0
+        cash_flow = [-100] + [0]*11 + [110]
+        
+        # Default behavior: annual_rate_is_effective=True
+        van = VAN(cash_flow, 0.10)
+        self.assertAlmostEqual(van, 0.0)
+        
+        # Test explicit flag False (Nominal APR)
+        # Nominal 12% APR -> 1% monthly.
+        # Flow: -100, +101 next month.
+        cash_flow_monthly = [-100, 101]
+        van_nominal = VAN(cash_flow_monthly, 0.12, annual_rate_is_effective=False)
+        self.assertAlmostEqual(van_nominal, 0.0)
+
+    def test_irr_bracketing_robustness(self):
+        """
+        Test the robustness of the new bracketing solver.
+        """
+        # Case with multiple sign changes usually problematic for simple solvers
+        # But here we just want to ensure it finds A valid root.
+        # -100, 230, -132 => Roots at 10% and 20%
+        # NPV(10%) = -100 + 230/1.1 - 132/1.21 = -100 + 209.09 - 109.09 = 0
+        cash_flow = [-100, 230, -132]
+        
+        tir_m = _resolver_tir(cash_flow)
+        
+        # It should return one of the valid roots (approx 0.10 or 0.20)
+        self.assertTrue(abs(tir_m - 0.10) < 1e-4 or abs(tir_m - 0.20) < 1e-4)
+
 if __name__ == '__main__':
     unittest.main()

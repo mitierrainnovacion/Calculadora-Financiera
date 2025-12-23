@@ -386,18 +386,16 @@ class App(ctk.CTk):
             tir_i = cf.TIR_anual(fcf_inversionista)
 
             # Cálculo de Métricas Adicionales (ROI y Múltiplo)
+            # El capital total invertido es la suma de todas las salidas (flujos negativos del inversionista)
+            # Esto captura mejor las "llamadas de capital" diferidas si las hubiere.
             flujos_inv = fcf_inversionista.values
-            
-            # El capital total invertido es la suma de todas las salidas (aportaciones de capital)
-            # En este modelo, el equity total se aporta en t=0 (monto_equity)
-            # Pero si hubiera cash calls, se reflejarían como flujos negativos.
-            inversion_total_equity = monto_equity
+            invested_equity = sum(-f for f in flujos_inv if f < 0)  
             
             # Total retornado es la suma de todas las distribuciones positivas
             total_retornado = sum(f for f in flujos_inv if f > 0)
             
-            multiplo = total_retornado / inversion_total_equity if inversion_total_equity > 0 else 0
-            roi_total = (total_retornado - inversion_total_equity) / inversion_total_equity if inversion_total_equity > 0 else 0
+            multiplo = (total_retornado / invested_equity) if invested_equity > 0 else 0
+            roi_total = ((total_retornado - invested_equity) / invested_equity) if invested_equity > 0 else 0
 
             # Actualizar GUI
             self.base_results_labels["inv_total"].configure(text=f"$ {inv_total:,.0f}")
