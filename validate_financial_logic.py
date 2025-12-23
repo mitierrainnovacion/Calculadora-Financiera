@@ -66,6 +66,18 @@ def run_scenario(debt_amount, scenario_name):
     print(f"TIR Proyecto: {tir_p*100:.2f}%" if tir_p else "TIR Proyecto: N/A")
     print(f"TIR Inversionista: {tir_i*100:.2f}%" if tir_i else "TIR Inversionista: N/A")
     
+    # ROI / MOIC calc matches GUI logic
+    flujos_inv = fcfe.values
+    invested_equity = sum(-f for f in flujos_inv if f < 0)
+    total_retornado = sum(f for f in flujos_inv if f > 0)
+    multiplo = (total_retornado / invested_equity) if invested_equity > 0 else 0
+    roi_total = ((total_retornado - invested_equity) / invested_equity) if invested_equity > 0 else 0
+    
+    print(f"Invested Equity: {invested_equity:,.2f}")
+    print(f"Total Retornado: {total_retornado:,.2f}")
+    print(f"MOIC: {multiplo:.2f}x")
+    print(f"ROI Total: {roi_total:.2%}")
+
     # Validaciones
     if debt_amount == 0:
         diff = abs(fcff.sum() - fcfe.sum())
@@ -74,17 +86,38 @@ def run_scenario(debt_amount, scenario_name):
             print("✅ VALIDACIÓN SIN DEUDA: FCFF y FCFE coinciden.")
         else:
             print(f"❌ ERROR SIN DEUDA: Diferencia FCFF vs FCFE = {diff:,.2f}")
-            
     else:
+        # Check Signs
+        # Entrada Deuda should be + at t=0
+        debt_in = df.loc[0, "Entrada Deuda"]
+        amort_sample = df["Amortización Principal"].min() # Should be negative
+        
+        if debt_in > 0:
+            print(f"✅ VALIDACIÓN SIGNO DEUDA: Entrada positiva ({debt_in:,.0f})")
+        else:
+            print(f"❌ ERROR SIGNO DEUDA: Entrada debería ser positiva. Valor: {debt_in}")
+            
+        if amort_sample < 0:
+             print(f"✅ VALIDACIÓN SIGNO AMORTIZACIÓN: Amortización negativa ({amort_sample:,.0f})")
+        else:
+             print(f"❌ ERROR SIGNO AMORTIZACIÓN: Debería ser negativa. Min: {amort_sample}")
+
         # En deuda moderada con costo bajo (5%) vs retorno alto, TIR inv > TIR proy
         if tir_p and tir_i and tir_i > tir_p:
              print(f"✅ VALIDACIÓN APALANCAMIENTO: TIR Inversionista ({tir_i*100:.1f}%) > TIR Proyecto ({tir_p*100:.1f}%) (Efecto palanca positivo).")
         elif tir_p and tir_i:
              print(f"⚠️ NOTA: TIR Inversionista <= TIR Proyecto. (Puede ser correcto si deuda muy cara o amortización agresiva).")
+             
+    # MOIC Consistency
+    moic_check = roi_total + 1
+    if abs(multiplo - moic_check) < 0.0001:
+        print("✅ VALIDACIÓN MOIC/ROI: Consistente (MOIC = 1 + ROI)")
+    else:
+        print(f"❌ ERROR MOIC/ROI: Inconsistente. MOIC={multiplo}, 1+ROI={moic_check}")
 
     # Mostrar primeros flujos para inspección visual
-    print("\nPrimeros 5 meses:")
-    cols_view = ["CAPEX", "Entrada Deuda", "FCF No Apalancado (FCFF)", "FCF Apalancado (FCFE)", "Utilidad Neta"]
+    print("\nPrimeros 5 meses (Traza Deuda/Amort):")
+    cols_view = ["CAPEX", "Entrada Deuda", "Amortización Principal", "FCF No Apalancado (FCFF)", "FCF Apalancado (FCFE)"]
     print(df[cols_view].head(5).to_string())
 
 print("=== INICIANDO VALIDACIÓN FINANCIERA ===")

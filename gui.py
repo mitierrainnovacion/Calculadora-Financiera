@@ -148,7 +148,8 @@ class App(ctk.CTk):
         
         # --- Pestaña de Detalle Deuda ---
         deuda_frame = self.output_tabview.tab("Detalle Deuda")
-        ctk.CTkLabel(deuda_frame, text="Cronograma de Amortización (Sistema Alemán)", font=ctk.CTkFont(weight="bold")).pack(pady=5)
+        self.lbl_cronograma = ctk.CTkLabel(deuda_frame, text="Cronograma de Amortización", font=ctk.CTkFont(weight="bold"))
+        self.lbl_cronograma.pack(pady=5)
         
         # Resumen de Deuda (Totalizadores)
         self.deuda_summary_frame = ctk.CTkFrame(deuda_frame)
@@ -253,10 +254,17 @@ class App(ctk.CTk):
         # Capitalización selector
         cap_frame = ctk.CTkFrame(finan_frame)
         cap_frame.pack(pady=4, padx=10, fill="x", expand=True)
-        ctk.CTkLabel(cap_frame, text="Capitalización de Intereses", width=450, anchor="w").pack(side="left", padx=10)
+        ctk.CTkLabel(cap_frame, text="Capitalización de Intereses", width=200, anchor="w").pack(side="left", padx=10)
         self.capitalizacion_var = ctk.StringVar(value=params["financiamiento"].get("capitalizacion", "Mensual"))
-        cap_combo = ctk.CTkComboBox(cap_frame, values=["Mensual", "Trimestral", "Semestral", "Anual"], variable=self.capitalizacion_var, width=200)
-        cap_combo.pack(side="left", padx=10, fill="x", expand=True)
+        cap_combo = ctk.CTkComboBox(cap_frame, values=["Mensual", "Trimestral", "Semestral", "Anual"], variable=self.capitalizacion_var, width=150)
+        cap_combo.pack(side="left", padx=5, fill="x", expand=True)
+
+        # Sistema Amortización selector
+        ctk.CTkLabel(cap_frame, text="Sistema", width=80, anchor="w").pack(side="left", padx=5)
+        self.sistema_amort_var = ctk.StringVar(value=params["financiamiento"].get("sistema_amortizacion", "Alemán"))
+        sys_combo = ctk.CTkComboBox(cap_frame, values=["Alemán", "Francés"], variable=self.sistema_amort_var, width=150)
+        sys_combo.pack(side="left", padx=5, fill="x", expand=True)
+
 
         self._create_entry(finan_frame, "Costo Capital Propio %", ("financiamiento", "costo_capital_propio_anual"), params["financiamiento"]["costo_capital_propio_anual"] * 100)
         self._create_entry(finan_frame, "Impuesto Renta %", ("financiamiento", "tasa_impuesto_renta"), params["financiamiento"]["tasa_impuesto_renta"] * 100)
@@ -386,8 +394,14 @@ class App(ctk.CTk):
             tir_i = cf.TIR_anual(fcf_inversionista)
 
             # Cálculo de Métricas Adicionales (ROI y Múltiplo)
-            # El capital total invertido es la suma de todas las salidas (flujos negativos del inversionista)
-            # Esto captura mejor las "llamadas de capital" diferidas si las hubiere.
+            # --------------------------------------------------------------------------
+            # ROI Total y MOIC (Múltiplo de Capital Investido)
+            # Estas métricas son ACUMULADAS sobre toda la vida del proyecto, no anualizadas.
+            # - Invested Equity: Suma de todos los flujos negativos (aportes de capital).
+            # - Total Retornado: Suma de todos los flujos positivos (distribuciones).
+            # - MOIC = Total Retornado / Invested Equity
+            # - ROI Total = (Total Retornado - Invested Equity) / Invested Equity = MOIC - 1
+            # --------------------------------------------------------------------------
             flujos_inv = fcf_inversionista.values
             invested_equity = sum(-f for f in flujos_inv if f < 0)  
             
@@ -416,6 +430,7 @@ class App(ctk.CTk):
             self.output_tabview.set("Resumen")
             
             # 5. Actualizar Detalle de Deuda
+            self.lbl_cronograma.configure(text=f"Cronograma de Amortización (Sistema {params['financiamiento']['sistema_amortizacion']})")
             self._update_deuda_treeview(modelo_df)
             
             # 6. Actualizar Proyección Operativa
@@ -449,7 +464,9 @@ class App(ctk.CTk):
         params["financiamiento"]["costo_deuda_anual"] = float(self.entries[("financiamiento", "costo_deuda_anual")].get()) / 100
         params["financiamiento"]["plazo_deuda_meses"] = int(self.entries[("financiamiento", "plazo_deuda_meses")].get())
         params["financiamiento"]["capitalizacion"] = self.capitalizacion_var.get()
+        params["financiamiento"]["sistema_amortizacion"] = self.sistema_amort_var.get()
         params["financiamiento"]["costo_capital_propio_anual"] = float(self.entries[("financiamiento", "costo_capital_propio_anual")].get()) / 100
+
         params["financiamiento"]["tasa_impuesto_renta"] = float(self.entries[("financiamiento", "tasa_impuesto_renta")].get()) / 100
         
         params["cronograma_inversion"] = []

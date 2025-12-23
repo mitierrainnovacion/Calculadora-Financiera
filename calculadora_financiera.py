@@ -80,11 +80,12 @@ def construir_cronograma_inversiones(p):
 
 def crear_tabla_amortizacion(p, monto_deuda):
     """
-    Calcula la tabla de amortización usando el SISTEMA ALEMÁN (amortización de capital constante por período de pago).
+    Calcula la tabla de amortización usando el sistema seleccionado (Alemán o Francés).
     Soporta diferentes frecuencias de capitalización/pago.
 
     - `plazo_deuda_meses` es el horizonte en meses del préstamo.
     - `capitalizacion` define la frecuencia de pago en meses (Mensual=1, Trimestral=3, Semestral=6, Anual=12).
+    - `sistema_amortizacion` define el tipo: "Alemán" (capital constante) o "Francés" (cuota constante).
     - La tasa anual `costo_deuda_anual` se interpreta como tasa efectiva anual (EAR).
     """
     import math
@@ -93,6 +94,10 @@ def crear_tabla_amortizacion(p, monto_deuda):
     tasa_anual = p["financiamiento"]["costo_deuda_anual"]
     freq_map = {"Mensual": 1, "Trimestral": 3, "Semestral": 6, "Anual": 12}
     period_months = freq_map.get(p["financiamiento"].get("capitalizacion", "Mensual"), 1)
+    
+    # Sistema de amortización (Default: Alemán)
+    sistema = p["financiamiento"].get("sistema_amortizacion", "Alemán")
+
 
     # Número de pagos (uno cada `period_months`)
     if period_months <= 0:
@@ -103,9 +108,24 @@ def crear_tabla_amortizacion(p, monto_deuda):
     # Si tasa_anual es EAR, la tasa periódica es:
     periodic_rate = (1 + tasa_anual) ** (period_months / 12.0) - 1 if num_payments > 0 else 0.0
 
-    # Amortización de capital por pago (sistema alemán: capital constante por pago)
-    amort_por_pago = (monto_deuda / num_payments) if num_payments > 0 else 0.0
-
+    # --- LÓGICA DE AMORTIZACIÓN POR SISTEMA ---
+    amort_por_pago = 0.0
+    cuota_francesa = 0.0
+    
+    if num_payments > 0 and monto_deuda > 0:
+        if sistema == "Alemán":
+            # Amortización de capital constante
+            amort_por_pago = monto_deuda / num_payments
+        elif sistema == "Francés":
+            # Cuota constante (Interés + Principal)
+            if periodic_rate > 0:
+                # Formula: A = P * [r(1+r)^n] / [(1+r)^n - 1]
+                factor = (1 + periodic_rate) ** num_payments
+                cuota_francesa = monto_deuda * (periodic_rate * factor) / (factor - 1)
+            else:
+                 # Si tasa es 0, es división simple
+                cuota_francesa = monto_deuda / num_payments
+    
     cronograma = []
     saldo = monto_deuda
 
@@ -115,13 +135,25 @@ def crear_tabla_amortizacion(p, monto_deuda):
             interes_pagado = 0.0
             principal_pagado = 0.0
 
-            # Si es mes de pago (cada period_months), se paga interés + principal
+            # Si es mes de pago (cada period_months)
             if mes % period_months == 0:
                 # calcular interés sobre el saldo vigente al inicio del período
                 interes_pagado = saldo * periodic_rate
-                principal_pagado = amort_por_pago
+                
+                if sistema == "Alemán":
+                    principal_pagado = amort_por_pago
+                elif sistema == "Francés":
+                    # Principal = Cuota - Interés
+                    cuota_actual = cuota_francesa
+                    
+                    # Ajuste final para no deber centavos o pagar de más
+                    if mes == ((num_payments) * period_months) or (saldo * (1+periodic_rate) < cuota_actual):
+                         # Última cuota o saldo pequeño: se liquida todo
+                         principal_pagado = saldo
+                    else:
+                        principal_pagado = cuota_actual - interes_pagado
 
-                # evitar sobregiro final por redondeos
+                # evitar sobregiro final por redondeos (común en ambos sistemas)
                 principal_pagado = min(principal_pagado, saldo)
                 saldo -= principal_pagado
 
