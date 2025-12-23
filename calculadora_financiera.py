@@ -80,49 +80,67 @@ def construir_cronograma_inversiones(p):
 
 def crear_tabla_amortizacion(p, monto_deuda):
     """
-    Calcula la tabla de amortización usando el SISTEMA ALEMÁN.
-    Soporta diferentes frecuencias de capitalización.
+    Calcula la tabla de amortización usando el SISTEMA ALEMÁN (amortización de capital constante por período de pago).
+    Soporta diferentes frecuencias de capitalización/pago.
+
+    - `plazo_deuda_meses` es el horizonte en meses del préstamo.
+    - `capitalizacion` define la frecuencia de pago en meses (Mensual=1, Trimestral=3, Semestral=6, Anual=12).
+    - La tasa anual `costo_deuda_anual` se interpreta como tasa efectiva anual (EAR).
     """
-    plazo = p["financiamiento"]["plazo_deuda_meses"]
+    import math
+
+    plazo_meses = p["financiamiento"]["plazo_deuda_meses"]
     tasa_anual = p["financiamiento"]["costo_deuda_anual"]
     freq_map = {"Mensual": 1, "Trimestral": 3, "Semestral": 6, "Anual": 12}
-    freq = freq_map.get(p["financiamiento"].get("capitalizacion", "Mensual"), 1)
-    
-    tasa_mensual = (1 + tasa_anual)**(1/12) - 1
-    
-    # En sistema Alemán, la amortización es constante
-    amort_mensual = monto_deuda / plazo if plazo > 0 else 0
-    
+    period_months = freq_map.get(p["financiamiento"].get("capitalizacion", "Mensual"), 1)
+
+    # Número de pagos (uno cada `period_months`)
+    if period_months <= 0:
+        period_months = 1
+    num_payments = math.ceil(plazo_meses / period_months) if plazo_meses > 0 else 0
+
+    # Tasa por período de pago (efectiva para el periodo)
+    # Si tasa_anual es EAR, la tasa periódica es:
+    periodic_rate = (1 + tasa_anual) ** (period_months / 12.0) - 1 if num_payments > 0 else 0.0
+
+    # Amortización de capital por pago (sistema alemán: capital constante por pago)
+    amort_por_pago = (monto_deuda / num_payments) if num_payments > 0 else 0.0
+
     cronograma = []
     saldo = monto_deuda
-    interes_acumulado = 0.0
-    
-    for mes in range(1, p["horizonte_meses"] + 1):
-        if mes <= plazo:
-            # El interés se calcula siempre sobre el saldo pendiente del mes anterior
-            interes_mes = saldo * tasa_mensual
-            interes_acumulado += interes_mes
-            
-            # La capitalización/pago de intereses ocurre según la frecuencia
-            interes_a_pagar = 0.0
-            if mes % freq == 0:
-                interes_a_pagar = interes_acumulado
-                interes_acumulado = 0.0
-            
-            principal = amort_mensual
-            saldo -= principal
+
+    horizonte = p["horizonte_meses"]
+    for mes in range(1, horizonte + 1):
+        if mes <= plazo_meses:
+            interes_pagado = 0.0
+            principal_pagado = 0.0
+
+            # Si es mes de pago (cada period_months), se paga interés + principal
+            if mes % period_months == 0:
+                # calcular interés sobre el saldo vigente al inicio del período
+                interes_pagado = saldo * periodic_rate
+                principal_pagado = amort_por_pago
+
+                # evitar sobregiro final por redondeos
+                principal_pagado = min(principal_pagado, saldo)
+                saldo -= principal_pagado
+
             cronograma.append({
                 "Mes": mes,
-                "Saldo Inicial": saldo + principal,
-                "Interés": interes_a_pagar,
-                "Principal": principal,
-                "Saldo Pendiente": max(0, saldo)
+                "Saldo Inicial": saldo + principal_pagado,
+                "Interés": interes_pagado,
+                "Principal": principal_pagado,
+                "Saldo Pendiente": max(0.0, saldo)
             })
         else:
             cronograma.append({
-                "Mes": mes, "Saldo Inicial": 0, "Interés": 0, "Principal": 0, "Saldo Pendiente": 0
+                "Mes": mes,
+                "Saldo Inicial": 0.0,
+                "Interés": 0.0,
+                "Principal": 0.0,
+                "Saldo Pendiente": 0.0
             })
-            
+
     return pd.DataFrame(cronograma).set_index("Mes")
 
 # ==============================================================================
@@ -170,7 +188,7 @@ def generar_modelo_financiero_detallado(p, capex, tabla_amortizacion, monto_deud
     perdida_arrastrable = 0.0
 
     for mes in range(1, horizonte + 1):
-        factor_precio = (1 + crecimiento_anual) ** ((mes - 1) // 12)
+        factor_precio = (1 + crecimiento_anual) ** ((mes - 1) / 12.0)
         lotes_vendidos_mes = 0
         
         for plan in v_planes:
@@ -262,7 +280,8 @@ def generar_modelo_financiero_detallado(p, capex, tabla_amortizacion, monto_deud
         df.loc[mes, "Flujo Caja Neto Inversionista"] = df.loc[mes, "FCF Apalancado (FCFE)"] - capital_aportado
 
     df.attrs["roi_estatico"] = (df["Utilidad Neta"].sum() / abs(df.loc[0, "CAPEX"])) if abs(df.loc[0, "CAPEX"]) != 0 else 0
-    df.attrs["multiplo_capital"] = (df["Flujo Caja Neto Inversionista"].sum() + df.loc[1, "Aportación Capital"]) / df.loc[1, "Aportación Capital"] if df.loc[1, "Aportación Capital"] != 0 else 0
+    aport = df.loc[1, "Aportación Capital"] if 1 in df.index else 0
+    df.attrs["multiplo_capital"] = ((np.nan if aport == 0 else (df["Flujo Caja Neto Inversionista"].sum() + aport) / aport))
     
     return df
 
@@ -381,15 +400,18 @@ def TIR_anual(flujos):
         # If any other unexpected error occurs, return None
         return None
 
-def VAN(flujos, tasa_descuento_anual):
+def VAN(flujos, tasa_descuento_anual, periodo_meses=1):
     """
-    Calcula el Valor Actual Neto (VAN) con compounding mensual.
+    Calcula el Valor Actual Neto (VAN).
+    - `tasa_descuento_anual` se interpreta como tasa efectiva anual (EAR).
+    - `periodo_meses` define la periodicidad de los flujos (por defecto 1 => mensual).
     """
-    tasa_mensual = tasa_descuento_anual / 12
-    val_actual = 0
-    flujos_valores = flujos.values if isinstance(flujos, pd.Series) else flujos
+    # Convertir tasa anual efectiva a tasa por período
+    tasa_periodica = (1 + tasa_descuento_anual) ** (periodo_meses / 12.0) - 1
+    val_actual = 0.0
+    flujos_valores = flujos.values if isinstance(flujos, pd.Series) else np.asarray(flujos, dtype=float)
     for t, cf in enumerate(flujos_valores):
-        val_actual += cf / ((1 + tasa_mensual) ** t)
+        val_actual += cf / ((1 + tasa_periodica) ** t)
     return val_actual
 
 def WACC(p):

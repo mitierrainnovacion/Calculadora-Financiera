@@ -69,5 +69,84 @@ class TestCalculadoraFinanciera(unittest.TestCase):
         cash_flow = [-100, -200, -300]
         self.assertIsNone(TIR_anual(cash_flow))
 
+
+    def test_amortizacion_alemana_simple(self):
+        """
+        Test German amortization: Constant principal repayment.
+        Loan 1200, 12 months, 0% interest -> 100 principal/month.
+        """
+        from calculadora_financiera import crear_tabla_amortizacion
+        p = {
+            "financiamiento": {
+                "plazo_deuda_meses": 12,
+                "costo_deuda_anual": 0.0,
+                "capitalizacion": "Mensual",
+                "monto_deuda": 1200
+            },
+            "horizonte_meses": 12
+        }
+        df = crear_tabla_amortizacion(p, 1200)
+        
+        # Check sum of principal equals 1200
+        self.assertAlmostEqual(df["Principal"].sum(), 1200.0)
+        # Check constant amortization
+        self.assertTrue(np.allclose(df.loc[1:12, "Principal"], 100.0))
+        # Check final balance is zero
+        self.assertAlmostEqual(df.iloc[-1]["Saldo Pendiente"], 0.0)
+
+    def test_amortizacion_trimestral(self):
+        """
+        Test quarterly payments.
+        Loan 1200, 12 months, quarterly -> 4 payments of 300 principal.
+        """
+        from calculadora_financiera import crear_tabla_amortizacion
+        p = {
+            "financiamiento": {
+                "plazo_deuda_meses": 12,
+                "costo_deuda_anual": 0.10, # Rate doesn't matter for principal schedule in German system
+                "capitalizacion": "Trimestral",
+                "monto_deuda": 1200
+            },
+            "horizonte_meses": 12
+        }
+        df = crear_tabla_amortizacion(p, 1200)
+        
+        # Principal should only be paid in months 3, 6, 9, 12
+        payment_months = [3, 6, 9, 12]
+        non_payment_months = [m for m in range(1, 13) if m not in payment_months]
+        
+        # Check sum
+        self.assertAlmostEqual(df["Principal"].sum(), 1200.0)
+        
+        # Check payments
+        self.assertTrue(np.allclose(df.loc[payment_months, "Principal"], 300.0))
+        self.assertTrue(np.allclose(df.loc[non_payment_months, "Principal"], 0.0))
+        
+        # Check Interest is also only paid in payment months
+        self.assertTrue(np.allclose(df.loc[non_payment_months, "Interés"], 0.0))
+        self.assertTrue(np.all(df.loc[payment_months, "Interés"] > 0))
+
+    def test_van_accuracy(self):
+        """
+        Test VAN calculation against a known manual calculation.
+        """
+        from calculadora_financiera import VAN
+        # Cash flows: [-1000, 1100] one year later.
+        # Discount rate 10% annual.
+        # VAN = -1000 + 1100 / (1.10) = -1000 + 1000 = 0
+        
+        # Case 1: Annual period
+        flujos = [-1000, 1100]
+        van = VAN(flujos, 0.10, periodo_meses=12)
+        self.assertAlmostEqual(van, 0.0)
+        
+        # Case 2: Monthly period
+        # Invest -1000, get 1010 next month. Annual rate that gives 1% monthly is (1.01)^12 - 1
+        tasa_mensual = 0.01
+        tasa_anual = (1 + tasa_mensual)**12 - 1
+        van_monthly = VAN([-1000, 1010], tasa_anual, periodo_meses=1)
+        # -1000 + 1010 / 1.01 = -1000 + 1000 = 0
+        self.assertAlmostEqual(van_monthly, 0.0)
+
 if __name__ == '__main__':
     unittest.main()
