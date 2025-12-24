@@ -6,6 +6,10 @@
 import numpy as np
 import pandas as pd
 import copy
+try:
+    from firebase_manager import FirebaseManager
+except ImportError:
+    FirebaseManager = None
 
 # ==============================================================================
 # 1. PARÁMETROS DEL PROYECTO
@@ -62,6 +66,22 @@ parametros = {
     },
     "items_periodicos": [],
 }
+
+def obtener_parametros_firebase(project_id="default_project"):
+    """
+    Intenta cargar los parámetros desde Firebase.
+    Si falla o no hay conexión, retorna None.
+    """
+    if FirebaseManager is None:
+        print("FirebaseManager no disponible. Instale firebase-admin.")
+        return None
+    
+    fm = FirebaseManager()
+    if not fm.db:
+        return None
+        
+    data = fm.get_project_data(project_id)
+    return data
 
 # ==============================================================================
 # 2. CÁLCULOS PRELIMINARES Y CRONOGRAMAS
@@ -638,8 +658,8 @@ def payback_descontado(flujos, tasa_anual):
             # Interpolación lineal para el mes exacto
             faltante = abs(acumulado_anterior)
             if flujo_descontado != 0:
-                fraccion = faltante / flujo_descontado
-                return mes - 1 + fraccion
+                fraccion = faltante / abs(flujo_descontado)
+                return (mes - 1) + fraccion
             else:
                 return float(mes)
     

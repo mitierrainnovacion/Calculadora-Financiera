@@ -91,8 +91,25 @@ class App(ctk.CTk):
         self.entries = {}
         self.create_input_widgets()
 
-        self.calculate_button = ctk.CTkButton(self.sidebar_frame, text="Calcular Análisis", command=self.calculate_analysis)
+        self.calculate_button = ctk.CTkButton(self.sidebar_frame, text="Calcular Análisis", command=self.calculate_analysis, font=ctk.CTkFont(size=14, weight="bold"))
         self.calculate_button.grid(row=2, column=0, padx=20, pady=10)
+
+        # Firebase Load Section
+        self.firebase_frame = ctk.CTkFrame(self.sidebar_frame, corner_radius=10)
+        self.firebase_frame.grid(row=3, column=0, padx=20, pady=10, sticky="ew")
+        
+        ctk.CTkLabel(self.firebase_frame, text="Firebase Cloud Data", font=ctk.CTkFont(size=12, weight="bold")).pack(pady=5)
+        
+        fb_input_frame = ctk.CTkFrame(self.firebase_frame, fg_color="transparent")
+        fb_input_frame.pack(padx=10, pady=5, fill="x")
+        
+        ctk.CTkLabel(fb_input_frame, text="ID Proyecto:").pack(side="left", padx=5)
+        self.project_id_entry = ctk.CTkEntry(fb_input_frame, placeholder_text="default_project")
+        self.project_id_entry.pack(side="left", fill="x", expand=True, padx=5)
+        self.project_id_entry.insert(0, "default_project")
+        
+        self.load_fb_button = ctk.CTkButton(self.firebase_frame, text="Cargar desde Firebase", command=self._load_from_firebase, fg_color="#3b5998", hover_color="#2d4373")
+        self.load_fb_button.pack(padx=10, pady=(0, 10), fill="x")
 
         # Panel principal de resultados
         self.main_frame = ctk.CTkFrame(self, corner_radius=10)
@@ -512,6 +529,79 @@ class App(ctk.CTk):
             })
             
         return params
+
+    def _load_from_firebase(self):
+        project_id = self.project_id_entry.get() or "default_project"
+        data = cf.obtener_parametros_firebase(project_id)
+        
+        if data:
+            try:
+                self._set_params_to_gui(data)
+                messagebox.showinfo("Éxito", f"Datos del proyecto '{project_id}' cargados correctamente.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Error al actualizar la interfaz: {e}")
+        else:
+            messagebox.showerror("Error", f"No se pudo cargar el proyecto '{project_id}'. Verifique el ID y la conexión.")
+
+    def _set_params_to_gui(self, params):
+        # 1. Parámetros Simples
+        self.entries["horizonte_meses"].delete(0, "end")
+        self.entries["horizonte_meses"].insert(0, str(params["horizonte_meses"]))
+        
+        self.entries[("ventas", "crecimiento_precio_anual")].delete(0, "end")
+        self.entries[("ventas", "crecimiento_precio_anual")].insert(0, str(params["ventas"]["crecimiento_precio_anual"] * 100))
+        
+        self.entries[("financiamiento", "monto_deuda")].delete(0, "end")
+        self.entries[("financiamiento", "monto_deuda")].insert(0, str(params["financiamiento"]["monto_deuda"]))
+        
+        self.entries[("financiamiento", "costo_deuda_anual")].delete(0, "end")
+        self.entries[("financiamiento", "costo_deuda_anual")].insert(0, str(params["financiamiento"]["costo_deuda_anual"] * 100))
+        
+        self.entries[("financiamiento", "plazo_deuda_meses")].delete(0, "end")
+        self.entries[("financiamiento", "plazo_deuda_meses")].insert(0, str(params["financiamiento"]["plazo_deuda_meses"]))
+        
+        self.capitalizacion_var.set(params["financiamiento"].get("capitalizacion", "Mensual"))
+        
+        self.entries[("financiamiento", "costo_capital_propio_anual")].delete(0, "end")
+        self.entries[("financiamiento", "costo_capital_propio_anual")].insert(0, str(params["financiamiento"]["costo_capital_propio_anual"] * 100))
+        
+        self.entries[("financiamiento", "tasa_impuesto_renta")].delete(0, "end")
+        self.entries[("financiamiento", "tasa_impuesto_renta")].insert(0, str(params["financiamiento"]["tasa_impuesto_renta"] * 100))
+
+        # 2. Cronograma Inversión
+        for item in self.investment_tree.get_children():
+            self.investment_tree.delete(item)
+        for item in params["cronograma_inversion"]:
+            self.investment_tree.insert("", "end", values=(item["item"], item["monto"], item["mes"], item.get("tag_sensibilidad", "")))
+
+        # 3. Planes de Venta
+        for item in self.planes_tree.get_children():
+            self.planes_tree.delete(item)
+        for p_v in params.get("planes_venta", []):
+            self.planes_tree.insert("", "end", values=(
+                p_v["nombre"],
+                p_v.get("tipo", "Dinámico"),
+                p_v.get("mes_inicio", 1),
+                p_v["cantidad_lotes"],
+                p_v.get("velocidad", 0),
+                p_v["monto_pie"],
+                p_v["monto_cuota"],
+                p_v["frecuencia"],
+                p_v["cantidad_cuotas"]
+            ))
+
+        # 4. Ítems Periódicos
+        for item in self.periodic_tree.get_children():
+            self.periodic_tree.delete(item)
+        for item in params.get("items_periodicos", []):
+            self.periodic_tree.insert("", "end", values=(
+                item["nombre"], 
+                item["monto"], 
+                item["base_calculo"],
+                item["mes_inicio"], 
+                item["mes_fin"], 
+                item["tipo"]
+            ))
 
     def _update_deuda_treeview(self, df):
         for item in self.deuda_tree.get_children():

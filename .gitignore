@@ -12,3 +12,4 @@ env/
 audit_german.py
 diagnostico_tir.py
 debug_irr.py
+firebase-key.json
